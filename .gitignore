@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.env
+*.key
+logs/
+jarvis_workspace/
+frontend/node_modules/
