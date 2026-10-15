@@ -1,3 +1,4 @@
+"""Tests for the configuration settings."""
 import re
 import sys
 from pathlib import Path, PureWindowsPath
