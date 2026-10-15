@@ -5,6 +5,7 @@ import pytest
 from backend.gate.audit import AuditLog
 from backend.gate.gate import Gate
 from backend.tools.notes import make_note_tools
+from backend.tools.apps import make_app_tools
 
 
 def gate_for(tmp_path):
@@ -63,3 +64,42 @@ def test_note_symlink_escape_blocked(tmp_path):
         pytest.skip("symlinks not permitted here")
     r = g.execute("read_note", {"title": "leak"})
     assert not r.ok and "secret" not in r.message
+
+ALLOWED = {
+    "notepad": r"C:\Windows\System32\notepad.exe",
+    "calculator": r"C:\Windows\System32\calc.exe",
+}
+
+
+def gate_with_apps(tmp_path, launcher):
+    tools = make_app_tools(ALLOWED, launcher)
+    return Gate(tools, AuditLog(tmp_path / "log.jsonl"), max_calls=1000)
+
+
+def test_app_launch_uses_list_no_shell(tmp_path):
+    calls = []
+    g = gate_with_apps(tmp_path, lambda *a, **k: calls.append((a, k)))
+    assert g.execute("open_app", {"name": "notepad"}).ok
+    (args, kwargs), = calls
+    assert args == ([ALLOWED["notepad"]],) and kwargs["shell"] is False
+
+
+def test_app_not_on_allowlist_denied(tmp_path):
+    calls = []
+    g = gate_with_apps(tmp_path, lambda *a, **k: calls.append(1))
+    for name in ["cmd", "powershell", "notepad && calc", "C:\\Windows\\System32\\cmd.exe", "", "Notepad"]:
+        assert not g.execute("open_app", {"name": name}).ok
+    assert calls == []
+
+
+def test_app_launch_failure_gives_safe_message(tmp_path):
+    def boom(*a, **k):
+        raise FileNotFoundError("C:\\secret\\path")
+
+    r = gate_with_apps(tmp_path, boom).execute("open_app", {"name": "notepad"})
+    assert not r.ok and "secret" not in r.message
+
+
+def test_empty_allowlist_refuses_everything(tmp_path):
+    g = Gate(make_app_tools({}, lambda *a, **k: None), AuditLog(tmp_path / "log.jsonl"))
+    assert not g.execute("open_app", {"name": "notepad"}).ok 
