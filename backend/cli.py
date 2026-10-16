@@ -14,6 +14,7 @@ from .flow import Flow, FlowError
 from .gate.audit import AuditLog
 from .gate.gate import Gate
 from .registry import build_gate
+from .ui.confirm import popup_confirm
 
 MAX_LINE = 10_000
 
@@ -39,12 +40,6 @@ Examples:
 Privacy: on the free Gemini tier, Google may review your sentences and use them to
 improve its products. Never put anything private in an ask.
 """
-
-
-def console_confirm(tool: str, args: dict) -> bool:
-    # Development only. The real version is an on-screen popup answered by a keypress.
-    return input(f"CONFIRM {tool} {args}? type YES: ").strip() == "YES"
-
 
 def _recent_log(audit: AuditLog, n: int = 5) -> str:
     if not audit.path.exists():
@@ -146,7 +141,7 @@ def _make_flow_getter(gate: Gate, get_brain: Callable[[], Brain]) -> Callable[[]
 
 
 def main() -> None:
-    gate = build_gate(confirm=console_confirm)
+    gate = build_gate(confirm=popup_confirm)
     audit = gate.audit                      # one shared log, so the chain stays unbroken
     get_brain = _make_brain_getter()
     get_flow = _make_flow_getter(gate, get_brain)
