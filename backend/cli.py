@@ -1,12 +1,15 @@
-"""Text-only dev console to exercise the gate by hand (no LLM, no voice yet).
+"""Text-only dev console to exercise the gate by hand (no voice yet).
 
 Run from the repo root:  python -m backend.cli
 """
 from __future__ import annotations
 
 import json
+from typing import Any, Callable
 
 from . import config
+from .brain import Brain, BrainError, GeminiBrain
+from .credentials import CredentialError, get_secret
 from .gate.audit import AuditLog
 from .gate.gate import Gate
 from .registry import build_gate
@@ -16,6 +19,8 @@ MAX_LINE = 10_000
 HELP = """Commands:
   tools                      list the tools and their risk level
   <tool> {json arguments}    run a tool through the gate
+  ask <sentence>             DRY RUN: sends your sentence to Google's Gemini AI and shows
+                             what it suggests. Nothing is executed.
   log                        show the last 5 audit entries
   verify                     check that the audit log was not tampered with
   help, quit
@@ -25,6 +30,10 @@ Examples:
   create_note {"title": "ideas", "text": "first note"}
   read_note {"title": "ideas"}
   open_app {"name": "notepad"}
+  ask open notepad
+
+Privacy: on the free Gemini tier, Google may review your sentences and use them to
+improve its products. Never put anything private in an ask.
 """
 
 
@@ -47,7 +56,22 @@ def _recent_log(audit: AuditLog, n: int = 5) -> str:
     return "\n".join(rows) or "(log is empty)"
 
 
-def handle_line(gate: Gate, audit: AuditLog, line: str) -> str | None:
+def _ask(gate: Gate, get_brain: Callable[[], Brain] | None, sentence: str) -> str:
+    """Dry run: show what the AI suggests, and run nothing."""
+    if get_brain is None:
+        return "NO: The AI is not set up."
+    try:
+        reply = get_brain().propose(sentence, gate.tool_specs())
+    except (BrainError, CredentialError) as exc:
+        return f"NO: {exc}"
+    if reply.proposal is not None:
+        args = json.dumps(reply.proposal.args, sort_keys=True)
+        return f"AI suggests: {reply.proposal.tool} {args}   (dry run, nothing was run)"
+    return f"AI says: {reply.text}"
+
+
+def handle_line(gate: Gate, audit: AuditLog, line: str,
+                get_brain: Callable[[], Brain] | None = None) -> str | None:
     """Run one console line. Returns text to print, or None to quit."""
     if len(line) > MAX_LINE:
         return "Input too long."
@@ -67,6 +91,8 @@ def handle_line(gate: Gate, audit: AuditLog, line: str) -> str | None:
         return "Audit log OK" if ok else f"Audit log TAMPERED (first bad line: {bad_line})"
 
     name, _, rest = line.partition(" ")
+    if name == "ask":
+        return _ask(gate, get_brain, rest)
     try:
         args = json.loads(rest) if rest.strip() else {}
     except json.JSONDecodeError:
@@ -75,16 +101,32 @@ def handle_line(gate: Gate, audit: AuditLog, line: str) -> str | None:
     return ("OK: " if result.ok else "NO: ") + result.message
 
 
+def _make_brain_getter() -> Callable[[], Brain]:
+    """Builds the Gemini brain on first use, so the console starts fast and offline."""
+    cache: list[Brain] = []
+
+    def get() -> Brain:
+        if not cache:
+            key = get_secret("gemini_api_key")
+            if not key:
+                raise BrainError("No Gemini key is stored. Run: python -m backend.credentials set gemini_api_key")
+            cache.append(GeminiBrain(key, config.GEMINI_MODEL, config.GEMINI_TIMEOUT_SECONDS))
+        return cache[0]
+
+    return get
+
+
 def main() -> None:
     gate = build_gate(confirm=console_confirm)
     audit = AuditLog(config.AUDIT_LOG)
+    get_brain = _make_brain_getter()
     print("J.A.R.V.I.S dev console. Type help for commands.")
     while True:
         try:
             line = input("> ")
         except (EOFError, KeyboardInterrupt):
             break
-        output = handle_line(gate, audit, line)
+        output = handle_line(gate, audit, line, get_brain)
         if output is None:
             break
         if output:
