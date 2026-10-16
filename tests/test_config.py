@@ -36,8 +36,13 @@ def test_limits_are_sane():
 
 
 
-def test_model_name_looks_like_a_model_name():
-    assert re.fullmatch(r"gemini-[a-z0-9][a-z0-9.\-]{1,40}", config.GEMINI_MODEL)
+def test_models_are_valid_pinned_names():
+    models = config.GEMINI_MODELS
+    assert 1 <= len(models) <= 3 and len(set(models)) == len(models)
+    for name in models:
+        assert re.fullmatch(r"gemini-[a-z0-9][a-z0-9.\-]{1,40}", name)
+        assert "latest" not in name                      # aliases silently change under you
+        assert not name.startswith("gemini-2.5")         # scheduled for shutdown on 16 October 2026
 
 
 def test_ai_timeout_is_sane():

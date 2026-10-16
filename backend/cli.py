@@ -128,7 +128,7 @@ def _make_brain_getter() -> Callable[[], Brain]:
             key = get_secret("gemini_api_key")
             if not key:
                 raise BrainError("No Gemini key is stored. Run: python -m backend.credentials set gemini_api_key")
-            cache.append(GeminiBrain(key, config.GEMINI_MODEL, config.GEMINI_TIMEOUT_SECONDS))
+            cache.append(GeminiBrain(key, config.GEMINI_MODELS, config.GEMINI_TIMEOUT_SECONDS))
         return cache[0]
 
     return get
