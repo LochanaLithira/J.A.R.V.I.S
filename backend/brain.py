@@ -10,12 +10,18 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 MAX_COMMAND_CHARS = 500
 MAX_RAW_REPLY_CHARS = 4000
 MAX_REPLY_TEXT_CHARS = 300
+
+
+# Google-side hiccups worth one quick second try. Quota (429) and key (401/403) errors are not.
+_RETRYABLE_CODES = {500, 502, 503, 504}
+RETRY_DELAY_SECONDS = 1.5
 
 _TOOL_NAME_RE = re.compile(r"[a-z][a-z0-9_]{0,39}")
 _CONTROL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
@@ -140,20 +146,20 @@ def parse_reply(raw: str) -> BrainReply:
     return BrainReply(proposal=Proposal(tool, args))
 
 
-
 def _explain_failure(exc: Exception) -> str:
-    """A safe, generic message for a failed AI call. Never includes the raw error text."""
+    """A safe, generic message for a failed AI call. Never includes the raw error text.
+    The numeric status code is included because it is not sensitive and helps diagnosis."""
     code = getattr(exc, "code", None)
     if code == 429:
         return "The AI service is busy, or the free limit is used up. Try again later."
     if code in (401, 403):
         return "The AI service rejected the key. Check it with: python -m backend.credentials status gemini_api_key"
     if code == 404:
-        return "That AI model isn't available. Check GEMINI_MODEL in config.py."
+            return "That AI model isn't available. Check GEMINI_MODELS in config.py."
     if code == 400:
         return "The AI service didn't accept the request (this can also mean the key is invalid)."
     if isinstance(code, int) and code >= 500:
-        return "The AI service is having trouble. Try again later."
+        return f"The AI service is having trouble (error {code}). Try again later."
     return "I couldn't reach the AI service."
 
 
@@ -163,9 +169,16 @@ class GeminiBrain:
     Sends ONLY the cleaned command text plus our own trusted instructions. It never
     sends notes, files, tool results or anything else from your laptop. No tools are
     given to the model, so it has no way to run anything itself.
+
+    `models` is one model name or several, tried in order when Google reports that a
+    model is temporarily overloaded.
     """
 
-    def __init__(self, api_key: str, model: str, timeout_seconds: float = 15.0, client: Any = None):
+    def __init__(self, api_key: str, models: str | tuple[str, ...], timeout_seconds: float = 15.0,
+                 client: Any = None, sleep: Callable[[float], None] = time.sleep):
+        names = (models,) if isinstance(models, str) else tuple(models)
+        if not names or not all(isinstance(n, str) and n.strip() for n in names):
+            raise BrainError("No AI model is configured. Check GEMINI_MODELS in config.py.")
         if client is None:
             if not isinstance(api_key, str) or not api_key:
                 raise BrainError("No Gemini key is stored. Run: python -m backend.credentials set gemini_api_key")
@@ -177,7 +190,28 @@ class GeminiBrain:
                 http_options=types.HttpOptions(timeout=int(timeout_seconds * 1000)),  # milliseconds
             )
         self._client = client
-        self._model = model
+        self._models = names
+        self._sleep = sleep
+
+    def _generate(self, command: str, config: dict[str, Any]) -> str | None:
+        """Try each model in turn. A temporary server error (5xx) gets one retry on the same
+        model, then moves on to the next model. Any other kind of error stops immediately."""
+        last_error: Exception | None = None
+        for model in self._models:
+            for attempt in (1, 2):
+                try:
+                    response = self._client.models.generate_content(
+                        model=model, contents=command, config=config
+                    )
+                    return response.text
+                except Exception as exc:  # network, quota, key or model problems: never show details
+                    code = getattr(exc, "code", None)
+                    if not (isinstance(code, int) and code in _RETRYABLE_CODES):
+                        raise BrainError(_explain_failure(exc)) from None
+                    last_error = exc
+                    if attempt == 1:
+                        self._sleep(RETRY_DELAY_SECONDS)
+        raise BrainError(_explain_failure(last_error)) if last_error else BrainError("I couldn't reach the AI service.")
 
     def propose(self, command: str, tool_specs: list[dict[str, Any]]) -> BrainReply:
         command = clean_command(command)
@@ -185,11 +219,4 @@ class GeminiBrain:
             "system_instruction": build_system_prompt(tool_specs),
             "response_mime_type": "application/json",
         }
-        try:
-            response = self._client.models.generate_content(
-                model=self._model, contents=command, config=config
-            )
-            raw = response.text
-        except Exception as exc:  # network, quota, key or model problems: never show details
-            raise BrainError(_explain_failure(exc)) from None
-        return parse_reply(raw)
+        return parse_reply(self._generate(command, config))

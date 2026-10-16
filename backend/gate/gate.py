@@ -39,6 +39,12 @@ class Gate:
         self._clock = clock
         self._calls: deque[float] = deque()
 
+    @property
+    def audit(self) -> AuditLog:
+        """The one audit log. Everything that records events must share this object,
+        because two writers on the same file would break the tamper-evident chain."""
+        return self._audit
+
     def tool_specs(self) -> list[dict[str, Any]]:
         """Descriptions of the tools that are safe to show the LLM. Never exposes the functions."""
         specs = []
@@ -106,3 +112,4 @@ class Gate:
 
         self._audit.record("ran", tool=tool.name, risk=tool.risk.value)
         return Result(True, output)
+
