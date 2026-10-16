@@ -33,3 +33,12 @@ def test_audit_log_is_outside_the_workspace():
 def test_limits_are_sane():
     assert 1 <= config.RATE_LIMIT_CALLS <= 100
     assert 1 <= config.RATE_LIMIT_WINDOW_SECONDS <= 3600
+
+
+
+def test_model_name_looks_like_a_model_name():
+    assert re.fullmatch(r"gemini-[a-z0-9][a-z0-9.\-]{1,40}", config.GEMINI_MODEL)
+
+
+def test_ai_timeout_is_sane():
+    assert 1 <= config.GEMINI_TIMEOUT_SECONDS <= 60
