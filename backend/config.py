@@ -23,5 +23,5 @@ RATE_LIMIT_WINDOW_SECONDS = 60.0
 
 # The AI model. Model names change often, so check Google AI Studio for the current
 # free Flash or Flash-Lite names, and edit this line if the name stops working.
-GEMINI_MODEL = "gemini-3.1-flash-lite"
+GEMINI_MODELS = ("gemini-3.1-flash-lite", "gemini-3.5-flash-lite")
 GEMINI_TIMEOUT_SECONDS = 15.0

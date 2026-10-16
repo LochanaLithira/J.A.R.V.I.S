@@ -206,3 +206,114 @@ def test_gemini_refuses_to_start_without_a_key():
 
 def test_the_real_sdk_client_can_be_built_without_network():
     assert GeminiBrain("k" * 20, "test-model", timeout_seconds=5) is not None
+
+
+
+# ---- temporary Google problems: one retry, with the status code shown -----------
+
+class SequenceClient:
+    """Plays back a list of outcomes: an Exception is raised, a string is returned as the answer.
+    Remembers which model each call asked for."""
+
+    def __init__(self, *outcomes):
+        self.outcomes, self.calls, self.models_seen = list(outcomes), 0, []
+        self.models = self
+
+    def generate_content(self, **kwargs):
+        self.calls += 1
+        self.models_seen.append(kwargs["model"])
+        outcome = self.outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return FakeResponse(outcome)
+
+
+OK_ANSWER = '{"tool": "list_notes", "args": {}}'
+
+
+def retrying_brain(client, slept):
+    return GeminiBrain("unused-key", "test-model", client=client, sleep=slept.append)
+
+
+@pytest.mark.parametrize("code", [500, 502, 503, 504])
+def test_a_temporary_server_error_is_retried_once(code):
+    client, slept = SequenceClient(FakeApiError(code), OK_ANSWER), []
+    reply = retrying_brain(client, slept).propose("list notes", SPECS)
+    assert reply.proposal == Proposal("list_notes", {}) and client.calls == 2 and slept == [1.5]
+
+
+def test_two_server_errors_in_a_row_give_up_with_the_status_code():
+    client, slept = SequenceClient(FakeApiError(503), FakeApiError(503)), []
+    with pytest.raises(BrainError) as e:
+        retrying_brain(client, slept).propose("list notes", SPECS)
+    assert "error 503" in str(e.value) and "SECRET" not in str(e.value)
+    assert client.calls == 2 and len(slept) == 1
+
+
+@pytest.mark.parametrize("code", [429, 401, 403, 404, 400])
+def test_quota_key_and_request_errors_are_not_retried(code):
+    client, slept = SequenceClient(FakeApiError(code)), []
+    with pytest.raises(BrainError):
+        retrying_brain(client, slept).propose("list notes", SPECS)
+    assert client.calls == 1 and slept == []
+
+
+def test_a_timeout_is_not_retried():
+    client, slept = SequenceClient(TimeoutError("slow")), []
+    with pytest.raises(BrainError):
+        retrying_brain(client, slept).propose("list notes", SPECS)
+    assert client.calls == 1 and slept == []
+
+
+def test_a_success_never_sleeps():
+    client, slept = SequenceClient(OK_ANSWER), []
+    retrying_brain(client, slept).propose("list notes", SPECS)
+    assert client.calls == 1 and slept == []
+
+
+
+# ---- fallback to the next model when one is overloaded -------------------------------
+
+def fallback_brain(client, slept):
+    return GeminiBrain("unused-key", ("m1", "m2"), client=client, sleep=slept.append)
+
+
+def test_an_overloaded_model_falls_back_to_the_next_one():
+    client, slept = SequenceClient(FakeApiError(503), FakeApiError(503), OK_ANSWER), []
+    reply = fallback_brain(client, slept).propose("list notes", SPECS)
+    assert reply.proposal == Proposal("list_notes", {})
+    assert client.models_seen == ["m1", "m1", "m2"] and slept == [1.5]
+
+
+def test_a_quick_recovery_does_not_switch_models():
+    client, slept = SequenceClient(FakeApiError(503), OK_ANSWER), []
+    fallback_brain(client, slept).propose("list notes", SPECS)
+    assert client.models_seen == ["m1", "m1"]
+
+
+def test_giving_up_after_every_model_is_overloaded():
+    client, slept = SequenceClient(*[FakeApiError(503)] * 4), []
+    with pytest.raises(BrainError) as e:
+        fallback_brain(client, slept).propose("list notes", SPECS)
+    assert "error 503" in str(e.value) and client.models_seen == ["m1", "m1", "m2", "m2"]
+    assert slept == [1.5, 1.5]
+
+
+def test_a_quota_error_on_the_first_model_does_not_fall_back():
+    client, slept = SequenceClient(FakeApiError(429)), []
+    with pytest.raises(BrainError):
+        fallback_brain(client, slept).propose("list notes", SPECS)
+    assert client.models_seen == ["m1"]
+
+
+def test_a_missing_fallback_model_is_reported_clearly():
+    client, slept = SequenceClient(FakeApiError(503), FakeApiError(503), FakeApiError(404)), []
+    with pytest.raises(BrainError) as e:
+        fallback_brain(client, slept).propose("list notes", SPECS)
+    assert "GEMINI_MODELS" in str(e.value) and client.models_seen == ["m1", "m1", "m2"]
+
+
+@pytest.mark.parametrize("models", ["", (), ("",), (5,)])
+def test_invalid_model_settings_are_refused(models):
+    with pytest.raises(BrainError):
+        GeminiBrain("unused-key", models, client=SequenceClient())
