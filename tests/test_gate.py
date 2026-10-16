@@ -84,3 +84,6 @@ def test_tool_specs_never_expose_callables(audit):
     specs = Gate([mk()], audit).tool_specs()
     assert specs[0]["name"] == "t" and "fn" not in specs[0]
     assert not any(callable(v) for v in specs[0].values())
+
+def test_gate_exposes_one_shared_audit_log(audit):
+    assert Gate([mk()], audit).audit is audit
