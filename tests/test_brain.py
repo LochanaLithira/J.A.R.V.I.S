@@ -4,8 +4,8 @@ from pathlib import Path
 import pytest
 
 from backend import brain
-from backend.brain import (BrainError, BrainReply, Proposal, build_system_prompt, clean_command,
-                           parse_reply)
+from backend.brain import (BrainError, BrainReply, GeminiBrain, Proposal, build_system_prompt,
+                           clean_command, parse_reply)
 
 SPECS = [
     {"name": "create_note", "description": "Create a new text note.", "risk": "medium",
@@ -123,3 +123,86 @@ def test_brain_never_imports_tools_or_the_gate():
             imported.append(("." * node.level) + (node.module or ""))
     banned = [m for m in imported if "tools" in m or "gate" in m]
     assert not banned, f"brain.py must stay independent of: {banned}"
+
+
+
+# ---- GeminiBrain (no network: a fake client stands in for Google) ------------
+
+class FakeResponse:
+    def __init__(self, text):
+        self.text = text
+
+
+class FakeClient:
+    def __init__(self, reply=None, error=None):
+        self.calls = []
+        self._reply, self._error = reply, error
+        self.models = self
+
+    def generate_content(self, **kwargs):
+        self.calls.append(kwargs)
+        if self._error:
+            raise self._error
+        return FakeResponse(self._reply)
+
+
+class FakeApiError(Exception):
+    def __init__(self, code, message="boom SECRET-KEY-123"):
+        super().__init__(message)
+        self.code = code
+
+
+def brain_with(client):
+    return GeminiBrain("unused-key", "test-model", client=client)
+
+
+def test_gemini_sends_only_the_cleaned_command_and_json_mode():
+    client = FakeClient('{"tool": "open_app", "args": {"name": "notepad"}}')
+    reply = brain_with(client).propose("  open   notepad\x00 ", SPECS)
+    assert reply.proposal == Proposal("open_app", {"name": "notepad"})
+    (call,) = client.calls
+    assert call["model"] == "test-model" and call["contents"] == "open notepad"
+    assert call["config"]["response_mime_type"] == "application/json"
+    assert "open_app" in call["config"]["system_instruction"]
+    assert "open notepad" not in call["config"]["system_instruction"]   # command stays out of the rules
+    assert set(call) == {"model", "contents", "config"}                 # no tools are offered to the model
+
+
+def test_gemini_reply_only():
+    reply = brain_with(FakeClient('{"tool": null, "reply": "Which app?"}')).propose("do it", SPECS)
+    assert reply.proposal is None and reply.text == "Which app?"
+
+
+@pytest.mark.parametrize("text", [None, "", "   ", "not json", '{"tool": 5}'])
+def test_gemini_unusable_answers_become_brain_errors(text):
+    with pytest.raises(BrainError):
+        brain_with(FakeClient(text)).propose("open notepad", SPECS)
+
+
+def test_gemini_does_not_call_the_service_for_an_unusable_command():
+    client = FakeClient('{"tool": "list_notes"}')
+    with pytest.raises(BrainError):
+        brain_with(client).propose("   ", SPECS)
+    assert client.calls == []
+
+
+@pytest.mark.parametrize("code, expected", [
+    (429, "free limit"), (401, "rejected the key"), (403, "rejected the key"),
+    (404, "GEMINI_MODEL"), (400, "didn't accept"), (500, "having trouble"), (503, "having trouble"),
+    (None, "couldn't reach"),
+])
+def test_gemini_failures_map_to_safe_messages(code, expected):
+    error = FakeApiError(code) if code else TimeoutError("timed out SECRET-KEY-123")
+    with pytest.raises(BrainError) as e:
+        brain_with(FakeClient(error=error)).propose("open notepad", SPECS)
+    assert expected in str(e.value) and "SECRET" not in str(e.value)
+    assert e.value.__cause__ is None
+
+
+def test_gemini_refuses_to_start_without_a_key():
+    with pytest.raises(BrainError):
+        GeminiBrain("", "test-model")
+
+
+def test_the_real_sdk_client_can_be_built_without_network():
+    assert GeminiBrain("k" * 20, "test-model", timeout_seconds=5) is not None

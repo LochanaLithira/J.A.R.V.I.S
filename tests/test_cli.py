@@ -1,7 +1,9 @@
 import pytest
 
 from backend import registry
+from backend.brain import BrainError, BrainReply, Proposal
 from backend.cli import handle_line
+from backend.credentials import CredentialError
 from backend.gate.audit import AuditLog
 
 
@@ -12,8 +14,8 @@ def console(tmp_path):
     return gate, AuditLog(log)
 
 
-def run(console, line):
-    return handle_line(*console, line)
+def run(console, line, get_brain=None):
+    return handle_line(*console, line, get_brain)
 
 
 @pytest.mark.parametrize("word", ["quit", "exit"])
@@ -69,3 +71,54 @@ def test_log_command_shows_recent_events(console):
 
 def test_overlong_input_refused(console):
     assert run(console, "list_notes " + "x" * 10_001) == "Input too long."
+
+
+# ---- ask: the AI dry run -----------------------------------------------------
+
+class FakeBrain:
+    def __init__(self, reply=None, error=None):
+        self.reply, self.error, self.seen = reply, error, []
+
+    def propose(self, command, tool_specs):
+        self.seen.append((command, [s["name"] for s in tool_specs]))
+        if self.error:
+            raise self.error
+        return self.reply
+
+
+def test_ask_without_a_brain_says_so(console):
+    assert run(console, "ask open notepad") == "NO: The AI is not set up."
+
+
+def test_ask_shows_the_suggestion_and_runs_nothing(console, tmp_path):
+    brain = FakeBrain(BrainReply(proposal=Proposal("create_note", {"title": "x", "text": "y"})))
+    out = run(console, "ask make a note called x", lambda: brain)
+    assert out == 'AI suggests: create_note {"text": "y", "title": "x"}   (dry run, nothing was run)'
+    assert not (tmp_path / "ws" / "notes" / "x.txt").exists()          # the tool did NOT run
+    log = tmp_path / "log.jsonl"
+    assert not log.exists() or "ran" not in log.read_text()            # and the gate never ran it
+    assert brain.seen == [("make a note called x", ["create_note", "read_note", "list_notes", "open_app"])]
+
+
+def test_ask_shows_a_spoken_reply(console):
+    out = run(console, "ask hello", lambda: FakeBrain(BrainReply(text="Which app?")))
+    assert out == "AI says: Which app?"
+
+
+@pytest.mark.parametrize("error", [BrainError("The AI service is busy."), CredentialError("No key.")])
+def test_ask_reports_failures_safely(console, error):
+    out = run(console, "ask open notepad", lambda: FakeBrain(error=error))
+    assert out == f"NO: {error}"
+
+
+def test_ask_with_an_empty_sentence_is_refused(console):
+    class Real:
+        def propose(self, command, tool_specs):
+            from backend.brain import clean_command
+            clean_command(command)
+
+    assert run(console, "ask", lambda: Real()).startswith("NO:")
+
+
+def test_help_mentions_the_privacy_warning(console):
+    assert "Google may review" in run(console, "help")
