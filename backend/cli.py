@@ -10,6 +10,7 @@ from typing import Any, Callable
 from . import config
 from .brain import Brain, BrainError, GeminiBrain
 from .credentials import CredentialError, get_secret
+from .flow import Flow, FlowError
 from .gate.audit import AuditLog
 from .gate.gate import Gate
 from .registry import build_gate
@@ -21,6 +22,8 @@ HELP = """Commands:
   <tool> {json arguments}    run a tool through the gate
   ask <sentence>             DRY RUN: sends your sentence to Google's Gemini AI and shows
                              what it suggests. Nothing is executed.
+  say <sentence>             REAL RUN: the AI suggests an action, the gate checks it, and it
+                             runs only if allowed. Also sends your sentence to Google.
   log                        show the last 5 audit entries
   verify                     check that the audit log was not tampered with
   help, quit
@@ -31,6 +34,7 @@ Examples:
   read_note {"title": "ideas"}
   open_app {"name": "notepad"}
   ask open notepad
+  say open notepad
 
 Privacy: on the free Gemini tier, Google may review your sentences and use them to
 improve its products. Never put anything private in an ask.
@@ -70,8 +74,20 @@ def _ask(gate: Gate, get_brain: Callable[[], Brain] | None, sentence: str) -> st
     return f"AI says: {reply.text}"
 
 
+def _say(get_flow: Callable[[], Flow] | None, sentence: str) -> str:
+    """Real run: brain -> gate -> tool. The gate still decides everything."""
+    if get_flow is None:
+        return "NO: The AI is not set up."
+    try:
+        result = get_flow().run(sentence)
+    except (BrainError, CredentialError, FlowError) as exc:
+        return f"NO: {exc}"
+    return ("OK: " if result.ok else "NO: ") + result.message
+
+
 def handle_line(gate: Gate, audit: AuditLog, line: str,
-                get_brain: Callable[[], Brain] | None = None) -> str | None:
+                get_brain: Callable[[], Brain] | None = None,
+                get_flow: Callable[[], Flow] | None = None) -> str | None:
     """Run one console line. Returns text to print, or None to quit."""
     if len(line) > MAX_LINE:
         return "Input too long."
@@ -93,6 +109,8 @@ def handle_line(gate: Gate, audit: AuditLog, line: str,
     name, _, rest = line.partition(" ")
     if name == "ask":
         return _ask(gate, get_brain, rest)
+    if name == "say":
+        return _say(get_flow, rest)
     try:
         args = json.loads(rest) if rest.strip() else {}
     except json.JSONDecodeError:
@@ -116,17 +134,29 @@ def _make_brain_getter() -> Callable[[], Brain]:
     return get
 
 
+def _make_flow_getter(gate: Gate, get_brain: Callable[[], Brain]) -> Callable[[], Flow]:
+    cache: list[Flow] = []
+
+    def get() -> Flow:
+        if not cache:
+            cache.append(Flow(get_brain(), gate))
+        return cache[0]
+
+    return get
+
+
 def main() -> None:
     gate = build_gate(confirm=console_confirm)
-    audit = AuditLog(config.AUDIT_LOG)
+    audit = gate.audit                      # one shared log, so the chain stays unbroken
     get_brain = _make_brain_getter()
+    get_flow = _make_flow_getter(gate, get_brain)
     print("J.A.R.V.I.S dev console. Type help for commands.")
     while True:
         try:
             line = input("> ")
         except (EOFError, KeyboardInterrupt):
             break
-        output = handle_line(gate, audit, line, get_brain)
+        output = handle_line(gate, audit, line, get_brain, get_flow)
         if output is None:
             break
         if output:
