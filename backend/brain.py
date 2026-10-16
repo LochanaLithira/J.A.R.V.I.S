@@ -138,3 +138,58 @@ def parse_reply(raw: str) -> BrainReply:
     if not isinstance(args, dict):
         raise BrainError("The assistant gave invalid arguments.")
     return BrainReply(proposal=Proposal(tool, args))
+
+
+
+def _explain_failure(exc: Exception) -> str:
+    """A safe, generic message for a failed AI call. Never includes the raw error text."""
+    code = getattr(exc, "code", None)
+    if code == 429:
+        return "The AI service is busy, or the free limit is used up. Try again later."
+    if code in (401, 403):
+        return "The AI service rejected the key. Check it with: python -m backend.credentials status gemini_api_key"
+    if code == 404:
+        return "That AI model isn't available. Check GEMINI_MODEL in config.py."
+    if code == 400:
+        return "The AI service didn't accept the request (this can also mean the key is invalid)."
+    if isinstance(code, int) and code >= 500:
+        return "The AI service is having trouble. Try again later."
+    return "I couldn't reach the AI service."
+
+
+class GeminiBrain:
+    """Asks Google's Gemini model for a suggestion.
+
+    Sends ONLY the cleaned command text plus our own trusted instructions. It never
+    sends notes, files, tool results or anything else from your laptop. No tools are
+    given to the model, so it has no way to run anything itself.
+    """
+
+    def __init__(self, api_key: str, model: str, timeout_seconds: float = 15.0, client: Any = None):
+        if client is None:
+            if not isinstance(api_key, str) or not api_key:
+                raise BrainError("No Gemini key is stored. Run: python -m backend.credentials set gemini_api_key")
+            from google import genai  # imported here so the SDK only loads when it is needed
+            from google.genai import types
+
+            client = genai.Client(
+                api_key=api_key,
+                http_options=types.HttpOptions(timeout=int(timeout_seconds * 1000)),  # milliseconds
+            )
+        self._client = client
+        self._model = model
+
+    def propose(self, command: str, tool_specs: list[dict[str, Any]]) -> BrainReply:
+        command = clean_command(command)
+        config = {
+            "system_instruction": build_system_prompt(tool_specs),
+            "response_mime_type": "application/json",
+        }
+        try:
+            response = self._client.models.generate_content(
+                model=self._model, contents=command, config=config
+            )
+            raw = response.text
+        except Exception as exc:  # network, quota, key or model problems: never show details
+            raise BrainError(_explain_failure(exc)) from None
+        return parse_reply(raw)
