@@ -25,3 +25,8 @@ RATE_LIMIT_WINDOW_SECONDS = 60.0
 # free Flash or Flash-Lite names, and edit this line if the name stops working.
 GEMINI_MODELS = ("gemini-3.1-flash-lite", "gemini-3.5-flash-lite")
 GEMINI_TIMEOUT_SECONDS = 15.0
+
+
+# Fish Audio voice. Leave empty for the default voice, or paste a voice ID (32 lowercase hex
+# characters) from fish.audio: open a voice and copy its model ID.
+FISH_VOICE_ID = "05b36da8574341d0803391491850db20"

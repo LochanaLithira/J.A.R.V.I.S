@@ -44,6 +44,7 @@ def make_note_tools(workspace: Path) -> list[Tool]:
     return [
         Tool("create_note", "Create a new text note (never overwrites).", Risk.MEDIUM,
              {"title": title, "text": Param(str, max_len=MAX_TEXT)}, create_note),
-        Tool("read_note", "Read a note by title.", Risk.LOW, {"title": title}, read_note),
-        Tool("list_notes", "List note titles.", Risk.LOW, {}, list_notes),
+        Tool("read_note", "Read a note by title.", Risk.LOW, {"title": title}, read_note,
+             private_output=True),
+        Tool("list_notes", "List note titles.", Risk.LOW, {}, list_notes, private_output=True),
     ]
