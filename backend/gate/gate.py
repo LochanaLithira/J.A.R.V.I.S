@@ -111,5 +111,5 @@ class Gate:
             return Result(False, "Something went wrong.")
 
         self._audit.record("ran", tool=tool.name, risk=tool.risk.value)
-        return Result(True, output)
+        return Result(True, output, private=tool.private_output)
 
