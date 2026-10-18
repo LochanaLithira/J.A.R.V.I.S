@@ -2,3 +2,6 @@ keyring
 google-genai
 langgraph
 httpx
+onnxruntime
+numpy
+sounddevice
