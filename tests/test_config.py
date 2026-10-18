@@ -47,3 +47,16 @@ def test_models_are_valid_pinned_names():
 
 def test_ai_timeout_is_sane():
     assert 1 <= config.GEMINI_TIMEOUT_SECONDS <= 60
+
+
+def test_models_dir_is_outside_the_workspace():
+    assert config.WORKSPACE != config.MODELS_DIR
+    assert config.WORKSPACE not in config.MODELS_DIR.parents
+
+
+def test_wake_settings_are_sane():
+    assert 0.05 <= config.WAKE_THRESHOLD <= 0.95
+    assert 1 <= config.WAKE_PATIENCE <= 10
+    assert 0.5 <= config.WAKE_COOLDOWN_SECONDS <= 10
+    assert 300 <= config.CLAP_MIN_LEVEL <= 32767
+    assert config.MIC_DEVICE is None or (isinstance(config.MIC_DEVICE, str) and config.MIC_DEVICE.strip())

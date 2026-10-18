@@ -1,4 +1,4 @@
-"""Text-only dev console to exercise the gate by hand (no voice yet).
+"""Dev console to exercise the gate, the AI, voice output and the wake-up triggers by hand.
 
 Run from the repo root:  python -m backend.cli
 """
@@ -18,6 +18,8 @@ from .gate.models import Result
 from .registry import build_gate
 from .ui.confirm import popup_confirm
 from .voice.speak import FishSpeaker, Speaker, spoken_text
+from .voice.triggers import (ClapDetector, Microphone, TriggerError, Triggers, WakeWordDetector,
+                             pick_microphone, play_chime)
 
 MAX_LINE = 10_000
 
@@ -29,7 +31,9 @@ HELP = """Commands:
   say <sentence>             REAL RUN: the AI suggests an action, the gate checks it, and it
                              runs only if allowed. Also sends your sentence to Google.
   voice on | voice off       speak the replies to say commands (on by default)
-  log                        show the last 5 audit entries
+  listen                     wait for "hey jarvis" or a double clap and chime (Ctrl+C stops).
+                             Runs fully on this laptop: no audio is sent anywhere.
+  log                       show the last 5 audit entries
   verify                     check that the audit log was not tampered with
   help, quit
 
@@ -128,10 +132,24 @@ def _say(get_flow: Callable[[], Flow] | None, sentence: str, voice: Voice | None
     return ("OK: " if result.ok else "NO: ") + result.message
 
 
+def _listen(get_listener: Callable[[], Callable[[], None]] | None) -> str:
+    """Run the wake-up triggers until Ctrl+C."""
+    if get_listener is None:
+        return "NO: Listening is not set up."
+    try:
+        get_listener()()
+    except TriggerError as exc:
+        return f"NO: {exc}"
+    except KeyboardInterrupt:
+        pass
+    return "Stopped listening."
+
+
 def handle_line(gate: Gate, audit: AuditLog, line: str,
                 get_brain: Callable[[], Brain] | None = None,
                 get_flow: Callable[[], Flow] | None = None,
-                voice: Voice | None = None) -> str | None:
+                voice: Voice | None = None,
+                get_listener: Callable[[], Callable[[], None]] | None = None) -> str | None:
     """Run one console line. Returns text to print, or None to quit."""
     if len(line) > MAX_LINE:
         return "Input too long."
@@ -151,6 +169,8 @@ def handle_line(gate: Gate, audit: AuditLog, line: str,
         return "Audit log OK" if ok else f"Audit log TAMPERED (first bad line: {bad_line})"
     if line in ("voice on", "voice off"):
         return voice.set(line == "voice on") if voice is not None else "Voice is not set up."
+    if line == "listen":
+        return _listen(get_listener)
 
     name, _, rest = line.partition(" ")
     if name == "ask":
@@ -201,19 +221,71 @@ def _make_voice() -> Voice:
     return Voice(speaker)
 
 
+class _NearMisses:
+    """Spots score bumps that rose but stayed under the threshold, to help tuning."""
+
+    def __init__(self, threshold: float):
+        self._threshold, self._peak, self._quiet = threshold, 0.0, 0
+
+    def update(self, score: float, woke: bool) -> float | None:
+        if woke:
+            self._peak, self._quiet = 0.0, 0
+            return None
+        if score > 0.10:
+            self._peak, self._quiet = max(self._peak, score), 0
+            return None
+        if self._peak > 0:
+            self._quiet += 1
+            if self._quiet >= 3:
+                peak, self._peak, self._quiet = self._peak, 0.0, 0
+                return peak if peak <= self._threshold else None
+        return None
+
+
+def _make_listener(audit: AuditLog, out: Callable[[str], None] = print) -> Callable[[], Callable[[], None]]:
+    """Builds the live listener on first use. The models are checked when listening starts."""
+
+    def get() -> Callable[[], None]:
+        wake = WakeWordDetector(config.MODELS_DIR)
+        clap = (ClapDetector(config.CLAP_MIN_LEVEL, on_clap=lambda level: out(f"  (clap heard, level {level:.0f})"))
+                if config.CLAP_ENABLED else None)
+        triggers = Triggers(wake, clap, config.WAKE_THRESHOLD, config.WAKE_PATIENCE,
+                            config.WAKE_COOLDOWN_SECONDS, audit=audit)
+        device = pick_microphone(config.MIC_DEVICE)
+
+        def listen() -> None:
+            near = _NearMisses(config.WAKE_THRESHOLD)
+            with Microphone(device) as mic:
+                out(f"Listening on {mic.name}. Say 'hey jarvis' or clap twice. Ctrl+C to stop.")
+                for chunk in mic.chunks():
+                    event = triggers.process(chunk)
+                    if event is not None:
+                        play_chime()
+                        detail = f" (score {event.score:.2f})" if event.score is not None else ""
+                        out(f"WAKE: {event.source}{detail}")
+                    missed = near.update(triggers.last_score, event is not None)
+                    if missed is not None:
+                        out(f"  (almost: score reached {missed:.2f})")
+
+        return listen
+
+    return get
+
+
 def main() -> None:
     gate = build_gate(confirm=popup_confirm)
     audit = gate.audit                      # one shared log, so the chain stays unbroken
     get_brain = _make_brain_getter()
     get_flow = _make_flow_getter(gate, get_brain)
     voice = _make_voice()
+    get_listener = _make_listener(audit)
     print("J.A.R.V.I.S dev console. Type help for commands.")
     while True:
         try:
             line = input("> ")
         except (EOFError, KeyboardInterrupt):
             break
-        output = handle_line(gate, audit, line, get_brain, get_flow, voice)
+        output = handle_line(gate, audit, line, get_brain, get_flow, voice, get_listener)
         if output is None:
             break
         if output:
