@@ -37,9 +37,11 @@ class Tool:
     risk: Risk
     params: Mapping[str, Param]
     fn: Callable[..., str]
+    private_output: bool = False    # True if the output can contain the user's own data (note text, file names...)
 
 
 @dataclass(frozen=True)
 class Result:
     ok: bool
     message: str
+    private: bool = False           # True: show on screen only, never send to a cloud service (e.g. text-to-speech)
