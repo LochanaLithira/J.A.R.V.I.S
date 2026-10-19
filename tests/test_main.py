@@ -455,6 +455,75 @@ def test_stop_phrases(text, stop):
     assert main.is_stop_phrase(text) is stop
 
 
+# ---- finished timers ------------------------------------------------------------------------
+
+def test_a_reminder_rings_speaks_a_fixed_line_and_shows_its_label(run_assistant):
+    alarms = []
+    a, trig, mics, statuses, notices, shown, chimes = run_assistant(alarm=lambda: alarms.append(1))
+    a.announce("take my medicine")
+    assert wait_for(lambda: shown == ["Timer done: take my medicine"])
+    assert alarms == [1]
+    assert a._voice.said == [(main.TIMER_DONE_LINE, True, True)]      # fixed line, spoken while muted
+    assert "medicine" not in main.TIMER_DONE_LINE
+
+
+def test_a_plain_timer_is_spoken_and_not_shown(run_assistant):
+    a, trig, mics, statuses, notices, shown, chimes = run_assistant(alarm=lambda: None)
+    a.announce("")
+    assert wait_for(lambda: a._voice.said == [(main.TIMER_DONE_LINE, True, True)])
+    time.sleep(0.05)
+    assert shown == []
+
+
+def test_a_plain_timer_is_shown_when_it_cannot_be_spoken(run_assistant):
+    a, trig, mics, statuses, notices, shown, chimes = run_assistant(alarm=lambda: None, voice=None)
+    a.announce("")
+    assert wait_for(lambda: shown == ["Your timer is done."])
+
+
+def test_timers_still_ring_while_paused(run_assistant):
+    alarms = []
+    a, trig, mics, *_ = run_assistant(alarm=lambda: alarms.append(1))
+    a.pause()
+    assert wait_for(lambda: a.status is Status.PAUSED)
+    a.announce("tea")
+    assert wait_for(lambda: alarms == [1]) and mics.open_now == 0
+
+
+def test_reminder_labels_are_never_logged(run_assistant):
+    records = []
+    handler = logging.Handler()
+    handler.emit = lambda r: records.append(r.getMessage())
+    main.log.addHandler(handler)
+    old_level = main.log.level
+    main.log.setLevel(logging.INFO)
+    try:
+        a, trig, mics, statuses, notices, shown, chimes = run_assistant(alarm=lambda: None)
+        a.announce("secret appointment")
+        assert wait_for(lambda: shown)
+    finally:
+        main.log.removeHandler(handler)
+        main.log.setLevel(old_level)
+    assert "timer finished" in records and not any("secret" in r for r in records)
+
+
+def test_console_timer_message(capsys):
+    from backend import cli
+
+    said = []
+
+    class V:
+        def say(self, result, wait=False):
+            said.append(result.message)
+            return True
+
+    cli._console_timer_done(V())("tea")
+    cli._console_timer_done(None)("")
+    out = capsys.readouterr().out
+    assert "TIMER: Timer done: tea" in out and "TIMER: Your timer is done." in out
+    assert said == [main.TIMER_DONE_LINE]
+
+
 def test_connections_are_warmed_on_wake_and_timing_is_logged(run_assistant):
     warmed, records = [], []
     handler = logging.Handler()
