@@ -12,7 +12,9 @@ Rules this file enforces:
 - Requests use HTTPS with timeouts, never follow redirects (so the key cannot be forwarded
   elsewhere), and cap the size of the reply. The audio must be plain PCM WAV, and its header is
   rebuilt from the bytes that arrived (Fish's streamed header holds fake sizes that crash PlaySound).
-- Audio plays from memory with Python's built-in winsound. Nothing is written to disk.
+- Audio plays from memory with Python's built-in winsound. Nothing is written to disk. Recent
+  replies are kept in memory (never on disk) so a repeated reply plays at once, and requests
+  reuse one kept-alive connection (keepalive.py), which saves over a second each.
 - Failure is quiet and explained: speak() returns False and last_error says why in plain words.
   If Fish is unreachable, nothing else breaks and the text reply still shows.
 """
@@ -21,6 +23,7 @@ from __future__ import annotations
 import re
 import struct
 import threading
+from collections import OrderedDict
 from typing import Any, Callable, Protocol
 
 API_URL = "https://api.fish.audio/v1/tts"
@@ -28,6 +31,7 @@ FREE_MODEL = "s2.1-pro-free"          # never change this to a paid model name
 MAX_SPOKEN_CHARS = 300
 MAX_AUDIO_BYTES = 8_000_000
 REQUEST_TIMEOUT_SECONDS = 15.0
+CACHE_REPLIES = 32                    # recent spoken replies kept in memory for instant replay
 
 PRIVATE_REPLY = "Done, sir. It's on your screen."
 
@@ -113,12 +117,15 @@ class _TooLarge(Exception):
 
 def _httpx_transport(url: str, headers: dict[str, str], payload: dict[str, Any], timeout: float,
                      client_factory: Callable[..., Any] | None = None) -> tuple[int, bytes]:
-    """Send one request. Returns (status code, body); the body is empty unless the status is 200."""
+    """Send one request over the kept-alive Fish connection (a fresh client only when one is
+    supplied, for tests). Returns (status code, body); the body is empty unless the status is 200."""
     import httpx  # imported here, so nothing loads until the first time something is spoken
 
-    factory = client_factory or httpx.Client
-    with factory(timeout=httpx.Timeout(timeout, connect=min(5.0, timeout)), follow_redirects=False) as client:
-        with client.stream("POST", url, headers=headers, json=payload) as response:
+    limits = httpx.Timeout(timeout, connect=min(5.0, timeout))
+
+    def send(client: Any) -> tuple[int, bytes]:
+        with client.stream("POST", url, headers=headers, json=payload, timeout=limits,
+                           follow_redirects=False) as response:
             if response.status_code != 200:
                 return response.status_code, b""
             body = bytearray()
@@ -127,6 +134,13 @@ def _httpx_transport(url: str, headers: dict[str, str], payload: dict[str, Any],
                 if len(body) > MAX_AUDIO_BYTES:
                     raise _TooLarge()
             return 200, bytes(body)
+
+    if client_factory is not None:
+        with client_factory(follow_redirects=False) as client:
+            return send(client)
+    from .keepalive import FISH
+
+    return send(FISH.client())
 
 
 class WinsoundPlayer:
@@ -183,6 +197,9 @@ class FishSpeaker:
         self._player = player or WinsoundPlayer()
         self._lock = threading.Lock()
         self._ticket = 0                      # bumped by every new reply and by stop()
+        # Replies repeat ("Opening notepad."), so recent audio is kept IN MEMORY ONLY and replayed
+        # instantly. Only text that was already allowed out loud ever gets here.
+        self._cache: OrderedDict[str, bytes] = OrderedDict()
         self.last_error = ""
 
     # ---- talking to Fish ---------------------------------------------------
@@ -244,10 +261,67 @@ class FishSpeaker:
             self._ticket += 1                 # a new reply replaces the old one
             ticket = self._ticket
         self._player.stop()
-        audio = self._fetch(cleaned)
+        with self._lock:
+            audio = self._cache.get(cleaned)
+            if audio is not None:
+                self._cache.move_to_end(cleaned)
         if audio is None:
-            return False
+            audio = self._fetch(cleaned)
+            if audio is None:
+                return False
+            with self._lock:
+                self._cache[cleaned] = audio
+                while len(self._cache) > CACHE_REPLIES:
+                    self._cache.popitem(last=False)
         if not wait:
             threading.Thread(target=self._play, args=(audio, ticket), daemon=True).start()
             return True
         return self._play(audio, ticket)
+
+
+class Voice:
+    """Speaks gate results, always through spoken_text(), so private results never leave the laptop.
+
+    By default it speaks in the background, so a console prompt never waits for Fish Audio. With
+    wait=True it returns only when speaking has finished, so the wake-up can stay muted for
+    exactly as long as J.A.R.V.I.S talks."""
+
+    def __init__(self, speaker: Speaker | None, report: Callable[[str], None] = print,
+                 background: bool = True):
+        self._speaker = speaker
+        self._report = report
+        self._background = background
+        self._thread: threading.Thread | None = None
+        self.enabled = speaker is not None
+
+    def set(self, on: bool) -> str:
+        if self._speaker is None:
+            return "Voice is not set up."
+        self.enabled = on
+        if not on:
+            self._speaker.stop()
+        return "Voice on." if on else "Voice off."
+
+    def say(self, result: Any, wait: bool = False) -> bool:
+        """Speak a result. Returns True if it was spoken (or handed to the background), and
+        False if voice is off or speaking failed, so the caller can show the reply instead."""
+        if not self.enabled or self._speaker is None:
+            return False
+        speaker, text = self._speaker, spoken_text(result)   # private results never leave the laptop
+
+        def work() -> bool:
+            ok = speaker.speak(text, wait=True)
+            if not ok:
+                self._report(f"(voice: {speaker.last_error})")
+            return ok
+
+        if self._background and not wait:
+            self._thread = threading.Thread(target=work, daemon=True)
+            self._thread.start()
+            return True
+        return work()
+
+    def finish(self, timeout: float = 30.0) -> None:
+        """Let the last reply finish speaking before the program closes."""
+        if self._thread is not None:
+            self._thread.join(timeout)

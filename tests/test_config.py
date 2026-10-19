@@ -62,6 +62,13 @@ def test_wake_settings_are_sane():
     assert config.MIC_DEVICE is None or (isinstance(config.MIC_DEVICE, str) and config.MIC_DEVICE.strip())
 
 
+def test_follow_up_settings_are_sane():
+    assert config.FOLLOW_UP_ON_QUESTION is True                 # answering a question needs no wake word
+    assert config.FOLLOW_UP_ALWAYS is False                     # the open window after every reply is opt-in
+    assert 2 <= config.FOLLOW_UP_SECONDS <= 10
+    assert 1 <= config.FOLLOW_UP_MAX_TURNS <= 5
+
+
 def test_speech_input_settings_are_sane():
     assert re.fullmatch(r"whisper-[a-z0-9.\-]+", config.STT_MODEL)
     assert re.fullmatch(r"[a-z]{2}", config.STT_LANGUAGE)

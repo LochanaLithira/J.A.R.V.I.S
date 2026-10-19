@@ -1,26 +1,26 @@
 """Dev console to exercise the gate, the AI, voice output, wake-up triggers and speech input by hand.
 
 Run from the repo root:  python -m backend.cli
+(The everyday background app is:  pythonw -m backend.main)
 """
 from __future__ import annotations
 
 import json
-import threading
-from typing import Any, Callable
+from typing import Callable
 
 from . import config
-from .brain import Brain, BrainError, GeminiBrain
-from .credentials import CredentialError, get_secret
+from .brain import Brain, BrainError
+from .credentials import CredentialError
 from .flow import Flow, FlowError
 from .gate.audit import AuditLog
 from .gate.gate import Gate
-from .gate.models import Result
+from .main import (Status, build_assistant, describe_heard, make_brain_getter, make_flow_getter, make_speech,
+                   make_voice)
 from .registry import build_gate
 from .ui.confirm import popup_confirm
-from .voice.listen import CommandRecorder, GroqTranscriber, Heard, SileroVAD, SpeechInput
-from .voice.speak import FishSpeaker, Speaker, spoken_text
-from .voice.triggers import (ClapDetector, Microphone, TriggerError, Triggers, WakeWordDetector,
-                             pick_microphone, play_chime)
+from .voice.listen import Heard
+from .voice.speak import Voice
+from .voice.triggers import Microphone, TriggerError, pick_microphone, play_chime
 
 MAX_LINE = 10_000
 
@@ -59,47 +59,6 @@ Spoken replies go to Fish Audio, which may keep them. Private results (note text
 titles) are never sent: you hear a fixed line and read the real answer on screen.
 """
 
-
-class Voice:
-    """Speaks console replies in the background, so the prompt never waits for Fish Audio."""
-
-    def __init__(self, speaker: Speaker | None, report: Callable[[str], None] = print,
-                 background: bool = True):
-        self._speaker = speaker
-        self._report = report
-        self._background = background
-        self._thread: threading.Thread | None = None
-        self.enabled = speaker is not None
-
-    def set(self, on: bool) -> str:
-        if self._speaker is None:
-            return "Voice is not set up."
-        self.enabled = on
-        if not on:
-            self._speaker.stop()
-        return "Voice on." if on else "Voice off."
-
-    def say(self, result: Result, wait: bool = False) -> None:
-        """Speak a result. With wait=True, return only when speaking has finished (used while
-        listening, so the microphone can be muted for exactly as long as J.A.R.V.I.S talks)."""
-        if not self.enabled or self._speaker is None:
-            return
-        speaker, text = self._speaker, spoken_text(result)   # private results never leave the laptop
-
-        def work() -> None:
-            if not speaker.speak(text, wait=True):
-                self._report(f"(voice: {speaker.last_error})")
-
-        if self._background and not wait:
-            self._thread = threading.Thread(target=work, daemon=True)
-            self._thread.start()
-        else:
-            work()
-
-    def finish(self, timeout: float = 30.0) -> None:
-        """Let the last reply finish speaking before the console closes."""
-        if self._thread is not None:
-            self._thread.join(timeout)
 
 def _recent_log(audit: AuditLog, n: int = 5) -> str:
     if not audit.path.exists():
@@ -142,21 +101,6 @@ def _say(get_flow: Callable[[], Flow] | None, sentence: str, voice: Voice | None
     return ("OK: " if result.ok else "NO: ") + result.message
 
 
-_NOTHING_HEARD = {
-    "no speech": "I didn't hear anything.",
-    "too short": "That was too short to understand.",
-    "stopped": "Stopped.",
-}
-
-
-def _describe_heard(heard: Heard) -> str:
-    if heard.error:
-        return f"NO: {heard.error}"
-    if not heard.text:
-        return _NOTHING_HEARD.get(heard.reason, "I couldn't make out any words.")
-    return f'Heard: "{heard.text}"'
-
-
 def _hear(get_hearer: Callable[[], Callable[[], Heard]] | None) -> str:
     """Dry run: record one spoken command and show the text. Nothing runs."""
     if get_hearer is None:
@@ -167,12 +111,12 @@ def _hear(get_hearer: Callable[[], Callable[[], Heard]] | None) -> str:
         return f"NO: {exc}"
     except KeyboardInterrupt:
         return "Stopped."
-    line = _describe_heard(heard)
+    line = describe_heard(heard)
     return line + ("   (dry run, nothing was run)" if heard.text else "")
 
 
 def _listen(get_listener: Callable[[], Callable[[], None]] | None) -> str:
-    """Run the wake-up triggers until Ctrl+C."""
+    """Run the hands-free loop until Ctrl+C."""
     if get_listener is None:
         return "NO: Listening is not set up."
     try:
@@ -227,77 +171,11 @@ def handle_line(gate: Gate, audit: AuditLog, line: str,
     return ("OK: " if result.ok else "NO: ") + result.message
 
 
-def _make_brain_getter() -> Callable[[], Brain]:
-    """Builds the Gemini brain on first use, so the console starts fast and offline."""
-    cache: list[Brain] = []
-
-    def get() -> Brain:
-        if not cache:
-            key = get_secret("gemini_api_key")
-            if not key:
-                raise BrainError("No Gemini key is stored. Run: python -m backend.credentials set gemini_api_key")
-            cache.append(GeminiBrain(key, config.GEMINI_MODELS, config.GEMINI_TIMEOUT_SECONDS))
-        return cache[0]
-
-    return get
-
-
-def _make_flow_getter(gate: Gate, get_brain: Callable[[], Brain]) -> Callable[[], Flow]:
-    cache: list[Flow] = []
-
-    def get() -> Flow:
-        if not cache:
-            cache.append(Flow(get_brain(), gate))
-        return cache[0]
-
-    return get
-
-
-def _make_voice() -> Voice:
-    """Builds the speaker. No network call happens here, and the key is read only when speaking."""
-    try:
-        speaker = FishSpeaker(lambda: get_secret("fish_api_key"), voice_id=config.FISH_VOICE_ID)
-    except ValueError as exc:               # a bad voice ID in config.py
-        print(f"Voice is off: {exc}")
-        return Voice(None)
-    return Voice(speaker)
-
-
-class _NearMisses:
-    """Spots score bumps that rose but stayed under the threshold, to help tuning."""
-
-    def __init__(self, threshold: float):
-        self._threshold, self._peak, self._quiet = threshold, 0.0, 0
-
-    def update(self, score: float, woke: bool) -> float | None:
-        if woke:
-            self._peak, self._quiet = 0.0, 0
-            return None
-        if score > 0.10:
-            self._peak, self._quiet = max(self._peak, score), 0
-            return None
-        if self._peak > 0:
-            self._quiet += 1
-            if self._quiet >= 3:
-                peak, self._peak, self._quiet = self._peak, 0.0, 0
-                return peak if peak <= self._threshold else None
-        return None
-
-
-def _make_speech(audit: AuditLog) -> SpeechInput:
-    """Silero VAD (local) to find your speech, Groq Whisper to turn it into text."""
-    recorder = CommandRecorder(SileroVAD(config.MODELS_DIR), max_seconds=config.LISTEN_MAX_SECONDS,
-                               no_speech_seconds=config.LISTEN_NO_SPEECH_SECONDS,
-                               end_silence=config.LISTEN_END_SILENCE_SECONDS)
-    transcriber = GroqTranscriber(lambda: get_secret("stt_api_key"), config.STT_MODEL, config.STT_LANGUAGE)
-    return SpeechInput(recorder, transcriber, audit)
-
-
 def _make_hearer(audit: AuditLog, out: Callable[[str], None] = print) -> Callable[[], Callable[[], Heard]]:
     """Builds the one-shot recorder for the hear command on first use."""
 
     def get() -> Callable[[], Heard]:
-        speech = _make_speech(audit)
+        speech = make_speech(audit)
         device = pick_microphone(config.MIC_DEVICE)
 
         def hear() -> Heard:
@@ -311,63 +189,24 @@ def _make_hearer(audit: AuditLog, out: Callable[[str], None] = print) -> Callabl
     return get
 
 
-def _act(text: str, get_flow: Callable[[], Flow] | None, voice: Voice | None, triggers: Triggers,
-         out: Callable[[str], None]) -> None:
-    """Run a heard command exactly like say, then speak the reply with the wake-up muted."""
-    if get_flow is None:
-        out("NO: The AI is not set up.")
-        return
-    try:
-        result = get_flow().run(text)
-    except (BrainError, CredentialError, FlowError) as exc:
-        out(f"NO: {exc}")
-        return
-    out(("OK: " if result.ok else "NO: ") + result.message)
-    if voice is not None:
-        triggers.set_muted(True)            # J.A.R.V.I.S's own voice must never wake it
-        try:
-            voice.say(result, wait=True)
-        finally:
-            triggers.set_muted(False)
-
-
 def _make_listener(audit: AuditLog, out: Callable[[str], None] = print,
                    get_flow: Callable[[], Flow] | None = None,
                    voice: Voice | None = None) -> Callable[[], Callable[[], None]]:
-    """Builds the live listener on first use. The models are checked when listening starts."""
+    """The same loop as the background app, printing to this console instead of a tray icon."""
 
     def get() -> Callable[[], None]:
-        wake = WakeWordDetector(config.MODELS_DIR)
-        clap = (ClapDetector(config.CLAP_MIN_LEVEL, on_clap=lambda level: out(f"  (clap heard, level {level:.0f})"))
-                if config.CLAP_ENABLED else None)
-        triggers = Triggers(wake, clap, config.WAKE_THRESHOLD, config.WAKE_PATIENCE,
-                            config.WAKE_COOLDOWN_SECONDS, audit=audit)
-        speech = _make_speech(audit)
-        device = pick_microphone(config.MIC_DEVICE)
+        greeted = []
 
-        def listen() -> None:
-            near = _NearMisses(config.WAKE_THRESHOLD)
-            with Microphone(device) as mic:
-                out(f"Listening on {mic.name}. Say 'hey jarvis' or clap twice, wait for the chime, "
-                    "then say your command. Ctrl+C to stop.")
-                for chunk in mic.chunks():
-                    event = triggers.process(chunk)
-                    if event is not None:
-                        play_chime()
-                        detail = f" (score {event.score:.2f})" if event.score is not None else ""
-                        out(f"WAKE: {event.source}{detail}")
-                        heard = speech.hear(mic.chunks())
-                        out(_describe_heard(heard))
-                        if heard.text:
-                            _act(heard.text, get_flow, voice, triggers, out)
-                        mic.drain()                 # drop anything heard while busy
-                        triggers.reset()            # and start the wake-up fresh
-                        continue
-                    missed = near.update(triggers.last_score, False)
-                    if missed is not None:
-                        out(f"  (almost: score reached {missed:.2f})")
+        def on_status(status: Status, problem: str) -> None:
+            if problem:
+                out(f"({status.value}: {problem})")
+            elif status is Status.LISTENING and not greeted:
+                greeted.append(True)
+                out("Listening. Say 'hey jarvis' or clap twice, wait for the chime, then say your command. "
+                    "Ctrl+C to stop.")
 
-        return listen
+        assistant = build_assistant(audit, get_flow, voice, out=out, on_status=on_status)
+        return assistant.run                      # runs here until Ctrl+C
 
     return get
 
@@ -375,9 +214,9 @@ def _make_listener(audit: AuditLog, out: Callable[[str], None] = print,
 def main() -> None:
     gate = build_gate(confirm=popup_confirm)
     audit = gate.audit                      # one shared log, so the chain stays unbroken
-    get_brain = _make_brain_getter()
-    get_flow = _make_flow_getter(gate, get_brain)
-    voice = _make_voice()
+    get_brain = make_brain_getter()
+    get_flow = make_flow_getter(gate, get_brain)
+    voice = make_voice()
     get_listener = _make_listener(audit, get_flow=get_flow, voice=voice)
     get_hearer = _make_hearer(audit)
     print("J.A.R.V.I.S dev console. Type help for commands.")

@@ -74,6 +74,18 @@ def test_nothing_said_sends_nothing():
     assert consumed <= 5.1
 
 
+def test_follow_ups_can_wait_less_for_you_to_start():
+    used = []
+
+    def feed():
+        for c in slices(quiet(10.0)):
+            used.append(c)
+            yield c
+
+    rec = CommandRecorder(LoudVAD(), no_speech_seconds=5.0).record(feed(), no_speech_seconds=2.0)
+    assert rec.reason == "no speech" and len(used) * CHUNK / SR <= 2.1
+
+
 def test_long_speech_is_capped():
     rec, consumed = record(tone(20.0), max_seconds=15.0)
     assert rec.reason == "time limit" and len(rec.audio) / SR <= 15.0 and consumed <= 15.1
@@ -306,87 +318,3 @@ def test_help_mentions_hear_and_groq(console):
     assert "hear" in text and "Groq" in text
 
 
-class FakeWake:
-    def __init__(self, scores):
-        self.scores = iter(scores)
-
-    def feed(self, chunk):
-        return next(self.scores, 0.0)
-
-
-class FakeVoice:
-    def __init__(self, triggers_holder):
-        self.said, self.holder = [], triggers_holder
-
-    def say(self, result, wait=False):
-        self.said.append((result.message, wait, self.holder["t"]._muted))
-
-
-def test_listen_hears_runs_and_speaks_with_wake_muted(monkeypatch, tmp_path):
-    audio = slices(np.zeros(CHUNK * 4))
-    drained = []
-
-    class Mic:
-        name = "Test Mic"
-
-        def __init__(self, device):
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *a):
-            pass
-
-        def chunks(self):
-            yield from audio
-            raise KeyboardInterrupt
-
-        def drain(self):
-            drained.append(1)
-            return 0
-
-    holder = {}
-    real_triggers = cli.Triggers
-
-    def make_triggers(*a, **k):
-        holder["t"] = real_triggers(*a, **k)
-        return holder["t"]
-
-    class Speech:
-        def hear(self, chunks):
-            return Heard(text="open notepad", reason="done")
-
-    class Flow:
-        def __init__(self):
-            self.seen = []
-
-        def run(self, text):
-            self.seen.append(text)
-            return Result(True, "Opening notepad.")
-
-    flow = Flow()
-    monkeypatch.setattr(cli, "WakeWordDetector", lambda d: FakeWake([0.0, 0.9]))
-    monkeypatch.setattr(cli, "ClapDetector", lambda *a, **k: None)
-    monkeypatch.setattr(cli, "Triggers", make_triggers)
-    monkeypatch.setattr(cli, "pick_microphone", lambda name: None)
-    monkeypatch.setattr(cli, "Microphone", Mic)
-    monkeypatch.setattr(cli, "play_chime", lambda: None)
-    monkeypatch.setattr(cli, "_make_speech", lambda audit: Speech())
-    lines = []
-    voice = FakeVoice(holder)
-    listen = cli._make_listener(AuditLog(tmp_path / "log.jsonl"), out=lines.append,
-                                get_flow=lambda: flow, voice=voice)()
-    with pytest.raises(KeyboardInterrupt):
-        listen()
-    assert flow.seen == ["open notepad"]
-    assert 'Heard: "open notepad"' in lines and "OK: Opening notepad." in lines
-    assert voice.said == [("Opening notepad.", True, True)]        # spoken, waited for, wake-up muted
-    assert holder["t"]._muted is False and drained == [1]
-
-
-def test_listen_without_ai_says_so(monkeypatch, tmp_path):
-    lines = []
-    t = cli.Triggers()
-    cli._act("open notepad", None, None, t, lines.append)
-    assert lines == ["NO: The AI is not set up."]

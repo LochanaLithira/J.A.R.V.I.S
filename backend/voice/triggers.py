@@ -422,22 +422,31 @@ class Microphone:
             except queue.Empty:
                 return dropped
 
-    def chunks(self, stop: threading.Event | None = None) -> Iterator[np.ndarray]:
+    def chunks(self, stop: threading.Event | None = None,
+               idle_timeout: float | None = None) -> Iterator[np.ndarray]:
+        """Yield slices until `stop` is set. With `idle_timeout`, a microphone that goes silent
+        at the driver level (typical after the laptop wakes from sleep) raises TriggerError, so
+        the caller can reopen it."""
+        last = time.monotonic()
         while stop is None or not stop.is_set():
             try:
-                yield self._queue.get(timeout=0.25)
+                chunk = self._queue.get(timeout=0.25)
             except queue.Empty:
+                if idle_timeout is not None and time.monotonic() - last > idle_timeout:
+                    raise TriggerError("The microphone stopped sending sound.")
                 continue
+            last = time.monotonic()
+            yield chunk
 
 
 # ---------------------------------------------------------------------------
 # The listening chime
 # ---------------------------------------------------------------------------
 
-def chime_wav(rate: int = 22050) -> bytes:
-    """A short rising two-note chime, as WAV bytes made in memory."""
+def chime_wav(rate: int = 22050, notes: tuple[tuple[float, float], ...] = ((880.0, 0.07), (1320.0, 0.10))) -> bytes:
+    """A short two-note chime, as WAV bytes made in memory. Rising = listening, falling = got it."""
     parts = []
-    for freq, seconds in ((880.0, 0.07), (1320.0, 0.10)):
+    for freq, seconds in notes:
         t = np.arange(int(rate * seconds)) / rate
         tone = np.sin(2 * np.pi * freq * t)
         fade = np.minimum(1.0, np.minimum(t, seconds - t) / 0.008)     # soft edges, no clicks
@@ -450,15 +459,27 @@ def chime_wav(rate: int = 22050) -> bytes:
 
 
 CHIME = chime_wav()
+DONE_CHIME = chime_wav(notes=((1320.0, 0.06), (990.0, 0.08)))   # "got it": you can stop talking
 
 
-def play_chime(player: Any = None) -> None:
-    """Play the chime without waiting for it."""
+def play_chime(player: Any = None, sound: bytes = CHIME) -> None:
+    """Play a chime without waiting for it."""
     if player is None:
         from .speak import WinsoundPlayer
 
         player = WinsoundPlayer()
-    threading.Thread(target=player.play, args=(CHIME,), daemon=True).start()
+    threading.Thread(target=player.play, args=(sound,), daemon=True).start()
+
+
+CLOSE_CHIME = chime_wav(notes=((660.0, 0.09),))   # one low note: "I've stopped listening"
+
+
+def play_done_chime(player: Any = None) -> None:
+    play_chime(player, DONE_CHIME)
+
+
+def play_close_chime(player: Any = None) -> None:
+    play_chime(player, CLOSE_CHIME)
 
 
 # ---------------------------------------------------------------------------
