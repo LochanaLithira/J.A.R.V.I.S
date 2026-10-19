@@ -60,3 +60,11 @@ def test_wake_settings_are_sane():
     assert 0.5 <= config.WAKE_COOLDOWN_SECONDS <= 10
     assert 300 <= config.CLAP_MIN_LEVEL <= 32767
     assert config.MIC_DEVICE is None or (isinstance(config.MIC_DEVICE, str) and config.MIC_DEVICE.strip())
+
+
+def test_speech_input_settings_are_sane():
+    assert re.fullmatch(r"whisper-[a-z0-9.\-]+", config.STT_MODEL)
+    assert re.fullmatch(r"[a-z]{2}", config.STT_LANGUAGE)
+    assert 3 <= config.LISTEN_MAX_SECONDS <= 30               # caps how much audio can leave per command
+    assert 1 <= config.LISTEN_NO_SPEECH_SECONDS <= config.LISTEN_MAX_SECONDS
+    assert 0.3 <= config.LISTEN_END_SILENCE_SECONDS <= 3
