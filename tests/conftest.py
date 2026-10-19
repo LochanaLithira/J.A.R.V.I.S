@@ -15,6 +15,13 @@ def audit(tmp_path):
     return AuditLog(tmp_path / "logs" / "audit.jsonl")
 
 
+@pytest.fixture(autouse=True)
+def only_the_test_workspace(monkeypatch):
+    """Tests never see your real Documents, Downloads and so on: file tools get the temporary
+    workspace only, unless a test hands them folders itself."""
+    monkeypatch.setattr(config, "FILE_FOLDERS", ("workspace",))
+
+
 @pytest.fixture(scope="session")
 def models_dir():
     try:

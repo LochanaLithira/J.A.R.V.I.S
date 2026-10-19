@@ -105,7 +105,9 @@ class Gate:
             output = tool.fn(**clean)
         except ToolError as exc:
             self._audit.record("failed", tool=tool.name, reason=str(exc))
-            return Result(False, str(exc))
+            # A private tool's errors can name your files ("There's no file called ..."), so they
+            # are private too.
+            return Result(False, str(exc), private=tool.private_output)
         except Exception as exc:  # unexpected: log the type only, show nothing internal
             self._audit.record("error", tool=tool.name, error_type=type(exc).__name__)
             return Result(False, "Something went wrong.")

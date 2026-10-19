@@ -99,7 +99,9 @@ def test_ask_shows_the_suggestion_and_runs_nothing(console, tmp_path):
     assert not (tmp_path / "ws" / "notes" / "x.txt").exists()          # the tool did NOT run
     log = tmp_path / "log.jsonl"
     assert not log.exists() or "ran" not in log.read_text()            # and the gate never ran it
-    assert brain.seen == [("make a note called x", ["create_note", "read_note", "list_notes", "open_app"])]
+    gate = console[0]
+    assert brain.seen == [("make a note called x", [s["name"] for s in gate.tool_specs()])]
+    assert brain.seen[0][1][:4] == ["create_note", "read_note", "list_notes", "open_app"]
 
 
 def test_ask_shows_a_spoken_reply(console):

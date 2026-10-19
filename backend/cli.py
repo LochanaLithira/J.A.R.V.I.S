@@ -14,9 +14,11 @@ from .credentials import CredentialError
 from .flow import Flow, FlowError
 from .gate.audit import AuditLog
 from .gate.gate import Gate
-from .main import (Status, build_assistant, describe_heard, make_brain_getter, make_flow_getter, make_speech,
-                   make_voice)
+from .gate.models import Result
+from .main import (TIMER_DONE_LINE, Status, build_assistant, describe_heard, make_brain_getter, make_flow_getter,
+                   make_speech, make_voice)
 from .registry import build_gate
+from .tools.timers import TimerService
 from .ui.confirm import popup_confirm
 from .voice.listen import Heard
 from .voice.speak import Voice
@@ -47,6 +49,9 @@ Examples:
   create_note {"title": "ideas", "text": "first note"}
   read_note {"title": "ideas"}
   open_app {"name": "notepad"}
+  list_files {"folder": "documents"}
+  find_files {"name": "budget"}
+  set_timer {"seconds": 300, "label": "tea"}
   ask open notepad
   say open notepad
   listen      then say "hey jarvis", wait for the chime, and say "open notepad"
@@ -191,8 +196,10 @@ def _make_hearer(audit: AuditLog, out: Callable[[str], None] = print) -> Callabl
 
 def _make_listener(audit: AuditLog, out: Callable[[str], None] = print,
                    get_flow: Callable[[], Flow] | None = None,
-                   voice: Voice | None = None) -> Callable[[], Callable[[], None]]:
-    """The same loop as the background app, printing to this console instead of a tray icon."""
+                   voice: Voice | None = None,
+                   timers: TimerService | None = None) -> Callable[[], Callable[[], None]]:
+    """The same loop as the background app, printing to this console instead of a tray icon.
+    While it runs, finished timers are announced by the loop (alarm and voice, label printed)."""
 
     def get() -> Callable[[], None]:
         greeted = []
@@ -206,18 +213,41 @@ def _make_listener(audit: AuditLog, out: Callable[[str], None] = print,
                     "Ctrl+C to stop.")
 
         assistant = build_assistant(audit, get_flow, voice, out=out, on_status=on_status)
-        return assistant.run                      # runs here until Ctrl+C
+
+        def listen() -> None:                     # runs here until Ctrl+C
+            previous = timers.on_fire if timers is not None else None
+            if timers is not None:
+                timers.on_fire = assistant.announce
+            try:
+                assistant.run()
+            finally:
+                if timers is not None:
+                    timers.on_fire = previous
+
+        return listen
 
     return get
 
 
+def _console_timer_done(voice: Voice | None) -> Callable[[str], None]:
+    """Outside `listen`: print the timer (with its label) and say the fixed line."""
+    def done(label: str) -> None:
+        print(f"\nTIMER: {'Timer done: ' + label if label else 'Your timer is done.'}")
+        if voice is not None:
+            voice.say(Result(True, TIMER_DONE_LINE))
+
+    return done
+
+
 def main() -> None:
-    gate = build_gate(confirm=popup_confirm)
+    timers = TimerService()
+    gate = build_gate(confirm=popup_confirm, timers=timers)
     audit = gate.audit                      # one shared log, so the chain stays unbroken
     get_brain = make_brain_getter()
     get_flow = make_flow_getter(gate, get_brain)
     voice = make_voice()
-    get_listener = _make_listener(audit, get_flow=get_flow, voice=voice)
+    timers.on_fire = _console_timer_done(voice)
+    get_listener = _make_listener(audit, get_flow=get_flow, voice=voice, timers=timers)
     get_hearer = _make_hearer(audit)
     print("J.A.R.V.I.S dev console. Type help for commands.")
     while True:
