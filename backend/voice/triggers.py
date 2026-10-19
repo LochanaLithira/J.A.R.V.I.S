@@ -472,6 +472,11 @@ def play_chime(player: Any = None, sound: bytes = CHIME) -> None:
 
 
 CLOSE_CHIME = chime_wav(notes=((660.0, 0.09),))   # one low note: "I've stopped listening"
+ALARM_CHIME = chime_wav(notes=((988.0, 0.12), (0.0, 0.08)) * 3)   # three beeps: a timer has finished
+
+
+def play_alarm(player: Any = None) -> None:
+    play_chime(player, ALARM_CHIME)
 
 
 def play_done_chime(player: Any = None) -> None:

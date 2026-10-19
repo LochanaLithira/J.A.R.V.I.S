@@ -21,6 +21,11 @@ ALLOWED_APPS = {
     "calculator": r"C:\Windows\System32\calc.exe",
 }
 
+# The only folders the file tools may touch, by name. Remove a name to keep J.A.R.V.I.S out of it.
+# "workspace" is the folder above; the others are found where Windows really keeps them (even if
+# moved to OneDrive). "Deleted" files go to a trash folder inside the workspace and can be restored.
+FILE_FOLDERS = ("workspace", "documents", "downloads", "desktop", "pictures", "music", "videos")
+
 # At most this many proposals per time window, enforced by the gate.
 RATE_LIMIT_CALLS = 10
 RATE_LIMIT_WINDOW_SECONDS = 60.0
