@@ -7,7 +7,8 @@ Rules this file enforces:
   ends; silence before and after is trimmed, and if you say nothing, nothing is sent at all.
 - Hard limits: at most 15 s per command, and 5 s to start speaking.
 - The upload goes over HTTPS to one fixed Groq URL, never follows redirects (so the key cannot
-  be forwarded elsewhere), has timeouts, and caps the size of the reply. The audio is built in
+  be forwarded elsewhere), has timeouts, and caps the size of the reply. It reuses one kept-alive
+  connection (see keepalive.py), which saves over a second per command. The audio is built in
   memory and never written to disk.
 - The Groq key is read from the Windows Credential Manager for each request. It is never stored
   on an object, logged, or put in a message.
@@ -29,6 +30,7 @@ from typing import Any, Callable, Iterable
 
 import numpy as np
 
+from .keepalive import GROQ
 from .triggers import SAMPLE_RATE, verify_models
 
 API_URL = "https://api.groq.com/openai/v1/audio/transcriptions"
@@ -98,7 +100,10 @@ class CommandRecorder:
         self.min_speech, self.skip_start = min_speech, skip_start
         self.keep_before, self.keep_after = keep_before, keep_after
 
-    def record(self, chunks: Iterable[np.ndarray]) -> Recording:
+    def record(self, chunks: Iterable[np.ndarray], no_speech_seconds: float | None = None) -> Recording:
+        """`no_speech_seconds` overrides the usual wait for you to start (shorter for follow-ups)."""
+        no_speech = self.no_speech_seconds if no_speech_seconds is None else min(no_speech_seconds,
+                                                                                 self.max_seconds)
         if hasattr(self._vad, "reset"):
             self._vad.reset()
         frame_s = VAD_FRAME / SAMPLE_RATE
@@ -121,7 +126,7 @@ class CommandRecorder:
                     run = run + 1 if (p >= 0.5 and t >= self.skip_start) else 0
                     if run >= 2:
                         start, last_speech, speech_frames, quiet = n - 1, n, 2, 0
-                    elif t + frame_s >= self.no_speech_seconds:
+                    elif t + frame_s >= no_speech:
                         return Recording(None, "no speech")
                 else:
                     if p >= 0.35:
@@ -167,19 +172,27 @@ def wav_bytes(audio: np.ndarray) -> bytes:
 
 def _httpx_transport(url: str, headers: dict[str, str], data: dict[str, str], audio: bytes,
                      timeout: float, client_factory: Callable[..., Any] | None = None) -> tuple[int, bytes]:
-    """Send one upload. Returns (status code, body); the body is capped in size."""
+    """Send one upload over the kept-alive Groq connection (a fresh client only when one is
+    supplied, for tests). Returns (status code, body); the body is capped in size."""
     import httpx
 
-    factory = client_factory or httpx.Client
     files = {"file": ("command.wav", audio, "audio/wav")}
-    with factory(timeout=httpx.Timeout(timeout, connect=min(5.0, timeout)), follow_redirects=False) as client:
-        with client.stream("POST", url, headers=headers, data=data, files=files) as response:
+    limits = httpx.Timeout(timeout, connect=min(5.0, timeout))
+
+    def send(client: Any) -> tuple[int, bytes]:
+        with client.stream("POST", url, headers=headers, data=data, files=files, timeout=limits,
+                           follow_redirects=False) as response:
             body = bytearray()
             for part in response.iter_bytes():
                 body += part
                 if len(body) > MAX_REPLY_BYTES:
                     raise SpeechError("Groq sent far more text than expected, so it was ignored.")
             return response.status_code, bytes(body)
+
+    if client_factory is not None:
+        with client_factory(follow_redirects=False) as client:
+            return send(client)
+    return send(GROQ.client())
 
 
 _STATUS_REASONS = {
@@ -263,19 +276,27 @@ class SpeechInput:
     """Record one command, send only the speech, return the text. Every upload is audited
     (when and how many seconds left the laptop), but the words themselves are not logged here."""
 
-    def __init__(self, recorder: CommandRecorder, transcriber: GroqTranscriber, audit: Any = None):
+    def __init__(self, recorder: CommandRecorder, transcriber: GroqTranscriber, audit: Any = None,
+                 on_recorded: Callable[[], None] | None = None):
         self._recorder, self._transcriber, self._audit = recorder, transcriber, audit
+        self.on_recorded = on_recorded          # called the moment you stop speaking (the "got it" tone)
 
     def _record(self, event: str, **fields: Any) -> None:
         if self._audit is not None:
             self._audit.record(event, **fields)
 
-    def hear(self, chunks: Iterable[np.ndarray]) -> Heard:
-        rec = self._recorder.record(chunks)
+    def hear(self, chunks: Iterable[np.ndarray], no_speech_seconds: float | None = None) -> Heard:
+        rec = (self._recorder.record(chunks) if no_speech_seconds is None
+               else self._recorder.record(chunks, no_speech_seconds=no_speech_seconds))
         if rec.audio is None:
             self._record("speech_skipped", reason=rec.reason)
             return Heard(reason=rec.reason)
         seconds = round(len(rec.audio) / SAMPLE_RATE, 2)
+        if self.on_recorded is not None:
+            try:
+                self.on_recorded()
+            except Exception:
+                pass
         try:
             text = self._transcriber.transcribe(rec.audio)
         except SpeechError as exc:
