@@ -1,9 +1,5 @@
-import hashlib
 import shutil
-import subprocess
-import sys
 import threading
-import wave
 
 import numpy as np
 import pytest
@@ -21,44 +17,6 @@ from backend.voice.triggers import (CHUNK, ClapDetector, Microphone, TriggerErro
 def slices(audio: np.ndarray):
     audio = np.concatenate([audio.astype(np.int16), np.zeros((-len(audio)) % CHUNK, np.int16)])
     return [audio[i:i + CHUNK] for i in range(0, len(audio), CHUNK)]
-
-
-@pytest.fixture(scope="session")
-def models_dir():
-    try:
-        verify_models(config.MODELS_DIR)
-    except TriggerError:
-        pytest.skip("wake-word models not downloaded (python -m backend.voice.triggers download)")
-    return config.MODELS_DIR
-
-
-@pytest.fixture(scope="session")
-def spoken(tmp_path_factory):
-    """Phrases spoken by Windows' built-in offline voice, as 16 kHz WAV files."""
-    if sys.platform != "win32":
-        pytest.skip("needs Windows text-to-speech")
-    out = tmp_path_factory.mktemp("spoken")
-    phrases = {"wake": "Hey Jarvis", "other": "I was talking to Travis about the weather yesterday"}
-    lines = ["Add-Type -AssemblyName System.Speech",
-             "$f = New-Object System.Speech.AudioFormat.SpeechAudioFormatInfo(16000, "
-             "[System.Speech.AudioFormat.AudioBitsPerSample]::Sixteen, [System.Speech.AudioFormat.AudioChannel]::Mono)",
-             "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer"]
-    for name, text in phrases.items():
-        lines += [f"$s.SetOutputToWaveFile('{out / (name + '.wav')}', $f)", f"$s.Speak('{text}')"]
-    lines.append("$s.Dispose()")
-    try:
-        subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", "; ".join(lines)],
-                       check=True, capture_output=True, timeout=90)
-    except Exception:
-        pytest.skip("Windows text-to-speech is not available")
-
-    def load(name):
-        with wave.open(str(out / f"{name}.wav")) as w:
-            audio = np.frombuffer(w.readframes(w.getnframes()), dtype=np.int16)
-        pad = np.zeros(16000, np.int16)
-        return np.concatenate([pad, audio, pad])
-
-    return {name: load(name) for name in phrases}
 
 
 # ---- model files --------------------------------------------------------------------
@@ -89,7 +47,7 @@ def test_download_saves_only_matching_files_from_fixed_urls(tmp_path, models_dir
     assert asked == [tr._RELEASE + n for n in tr.MODEL_FILES]
     assert all(u.startswith("https://github.com/dscripka/openWakeWord/releases/download/v0.5.1/") for u in asked)
     verify_models(tmp_path)
-    assert download_models(tmp_path, fetch) == [] and len(asked) == 3        # nothing fetched twice
+    assert download_models(tmp_path, fetch) == [] and len(asked) == len(tr.MODEL_FILES)   # nothing fetched twice
 
 
 @pytest.mark.parametrize("data", [b"not a model", b"x" * (tr.MAX_MODEL_BYTES + 1), None],
@@ -295,6 +253,27 @@ def test_double_clap_wakes_and_every_wake_is_audited(audit):
     assert audit.verify()[0]
 
 
+def test_reset_forgets_old_sound(models_dir, spoken):
+    det, clap_det = WakeWordDetector(models_dir), ClapDetector()
+    t = Triggers(det, clap_det)
+    for c in slices(spoken["wake"][:24000]):                 # half of the phrase, then a gap
+        t.process(c)
+    t.reset()
+    assert len(det._embeddings) == 0 and clap_det._last_clap is None
+    assert all(t.process(c) is None for c in slices(np.zeros(16000)))
+
+
+def test_reset_calls_both_detectors():
+    seen = []
+
+    class D:
+        def reset(self):
+            seen.append(1)
+
+    Triggers(D(), D()).reset()
+    assert seen == [1, 1]
+
+
 @pytest.mark.parametrize("kw", [{"threshold": 0}, {"threshold": 1}, {"patience": 0}, {"patience": 1.5}])
 def test_bad_rules_refused(kw):
     with pytest.raises(ValueError):
@@ -359,6 +338,14 @@ def test_microphone_drops_oldest_when_behind():
             made[0].kw["callback"](np.full((CHUNK, 1), value, np.int16), CHUNK, None, None)
         it = mic.chunks()
         assert [next(it)[0], next(it)[0]] == [2, 3] and mic.dropped == 1
+
+
+def test_microphone_drain_drops_queued_slices():
+    made = []
+    with Microphone(stream_factory=lambda **kw: made.append(FakeStream(**kw)) or made[-1]) as mic:
+        for value in (1, 2, 3):
+            made[0].kw["callback"](np.full((CHUNK, 1), value, np.int16), CHUNK, None, None)
+        assert mic.drain() == 3 and mic.drain() == 0
 
 
 def test_microphone_open_failure_hides_details():
@@ -444,12 +431,21 @@ def test_listener_wiring_chimes_and_prints(monkeypatch, tmp_path):
             yield from audio
             raise KeyboardInterrupt
 
+        def drain(self):
+            return 0
+
     chimes = []
     monkeypatch.setattr(cli, "WakeWordDetector", lambda d: FakeWake([0.0, 0.9, 0.0]))
     monkeypatch.setattr(cli, "ClapDetector", lambda *a, **k: FakeClap([False] * 3))
     monkeypatch.setattr(cli, "pick_microphone", lambda name: 5)
     monkeypatch.setattr(cli, "Microphone", Mic)
     monkeypatch.setattr(cli, "play_chime", lambda: chimes.append(1))
+
+    class NoSpeech:
+        def hear(self, chunks):
+            return cli.Heard(reason="no speech")
+
+    monkeypatch.setattr(cli, "_make_speech", lambda audit: NoSpeech())
     lines = []
     audit = AuditLog(tmp_path / "log.jsonl")
     listen = cli._make_listener(audit, out=lines.append)()

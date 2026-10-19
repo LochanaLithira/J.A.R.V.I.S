@@ -5,8 +5,9 @@ Rules this file enforces:
   checked, and thrown away. Nothing is written to disk.
 - Waking up gives no permission. It only means "start listening"; every action still goes
   through the gate, and high-risk ones still need a keypress.
-- The three model files come from the openWakeWord v0.5.1 release. Their SHA-256 fingerprints
-  are fixed in this file and checked every time they load, so a changed file is refused.
+- The model files (three for the wake word, plus Silero VAD used by listen.py) come from the
+  openWakeWord v0.5.1 release. Their SHA-256 fingerprints are fixed in this file and checked
+  every time they load, so a changed file is refused.
 - The models live outside the workspace (config.MODELS_DIR), so no tool can ever write them.
 - Light on the laptop: onnxruntime uses one thread, and during silence the models are skipped.
 
@@ -44,6 +45,8 @@ MODEL_FILES = {
     "melspectrogram.onnx": "ba2b0e0f8b7b875369a2c89cb13360ff53bac436f2895cced9f479fa65eb176f",
     "embedding_model.onnx": "70d164290c1d095d1d4ee149bc5e00543250a7316b59f31d056cff7bd3075c1f",
     "hey_jarvis_v0.1.onnx": "94a13cfe60075b132f6a472e7e462e8123ee70861bc3fb58434a73712ee0d2cb",
+    # Silero VAD v4 (same release): tells speech from silence, so recording stops when you stop.
+    "silero_vad.onnx": "a35ebf52fd3ce5f1469b2a36158dba761bc47b973ea3382b3186ca15b1f5af28",
 }
 MAX_MODEL_BYTES = 5_000_000
 
@@ -208,6 +211,10 @@ class ClapDetector:
         self.max_level_ratio = max_level_ratio
         self.onset_ratio = onset_ratio
         self.on_clap = on_clap             # told the level of every single clap (for tuning)
+        self.reset()
+
+    def reset(self) -> None:
+        """Forget everything heard so far (used after J.A.R.V.I.S stops listening or speaking)."""
         self._n = 0                        # frames seen; time = n * 10 ms
         self._recent: deque = deque([0.0] * 3, maxlen=3)   # the last 30 ms, to judge how sudden a start is
         self._background = 50.0
@@ -292,6 +299,14 @@ class Triggers:
         self._muted = False
         self._muted_until = -math.inf
         self.last_score = 0.0
+
+    def reset(self) -> None:
+        """Start fresh after a gap in the audio (while a command was recorded or a reply spoken),
+        so sound from before the gap can never be joined to sound after it."""
+        for detector in (self._wake, self._clap):
+            if detector is not None and hasattr(detector, "reset"):
+                detector.reset()
+        self._above = 0
 
     def set_muted(self, muted: bool) -> None:
         """Call with True while J.A.R.V.I.S is speaking, and False when it stops."""
@@ -396,6 +411,16 @@ class Microphone:
                 self._stream.close()
             finally:
                 self._stream = None
+
+    def drain(self) -> int:
+        """Throw away slices that piled up (e.g. J.A.R.V.I.S's own voice). Returns how many."""
+        dropped = 0
+        while True:
+            try:
+                self._queue.get_nowait()
+                dropped += 1
+            except queue.Empty:
+                return dropped
 
     def chunks(self, stop: threading.Event | None = None) -> Iterator[np.ndarray]:
         while stop is None or not stop.is_set():
