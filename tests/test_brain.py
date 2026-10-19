@@ -168,6 +168,39 @@ def test_gemini_sends_only_the_cleaned_command_and_json_mode():
     assert set(call) == {"model", "contents", "config"}                 # no tools are offered to the model
 
 
+def test_answer_to_a_question_is_sent_with_that_question():
+    from backend.brain import Turn
+
+    client = FakeClient('{"tool": "open_app", "args": {"name": "notepad"}}')
+    brain_with(client).propose(" notepad ", SPECS, history=(Turn("open an  app", "Which app, sir?"),))
+    contents = client.calls[0]["contents"]
+    assert contents == [
+        {"role": "user", "parts": [{"text": "open an app"}]},
+        {"role": "model", "parts": [{"text": '{"tool": null, "reply": "Which app, sir?"}'}]},
+        {"role": "user", "parts": [{"text": "notepad"}]},
+    ]
+    assert "Which app" not in client.calls[0]["config"]["system_instruction"]   # history never enters the rules
+
+
+def test_history_is_limited_and_cleaned():
+    from backend.brain import MAX_REPLY_TEXT_CHARS, Turn, build_contents
+
+    turns = (Turn("first", "Old question?"), Turn("second\x07", "New\nquestion?" + "x" * 900))
+    contents = build_contents("answer", turns)
+    assert len(contents) == 3                                          # only the latest exchange
+    assert contents[0]["parts"][0]["text"] == "second"
+    assert len(contents[1]["parts"][0]["text"]) < MAX_REPLY_TEXT_CHARS + 40
+    assert build_contents("answer") == "answer"                         # no history: exactly as before
+    assert build_contents("answer", (Turn("x", ""),)) == "answer"       # an empty question adds nothing
+
+
+def test_rules_ask_for_one_short_question_when_a_detail_is_missing():
+    from backend.brain import build_system_prompt
+
+    prompt = build_system_prompt(SPECS)
+    assert "one short question ending with a question mark" in prompt
+
+
 def test_gemini_reply_only():
     reply = brain_with(FakeClient('{"tool": null, "reply": "Which app?"}')).propose("do it", SPECS)
     assert reply.proposal is None and reply.text == "Which app?"

@@ -45,3 +45,4 @@ class Result:
     ok: bool
     message: str
     private: bool = False           # True: show on screen only, never send to a cloud service (e.g. text-to-speech)
+    question: bool = False          # True: the AI asked you something, so J.A.R.V.I.S listens for the answer

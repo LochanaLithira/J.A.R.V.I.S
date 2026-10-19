@@ -227,6 +227,80 @@ def ask_user(text: str, runner: Runner | None = None, timeout: float = TIMEOUT_S
     return code == 0 and isinstance(output, str) and output.strip() == token
 
 
+# ---------------------------------------------------------------------------
+# Showing a private reply (used when J.A.R.V.I.S runs in the background)
+# ---------------------------------------------------------------------------
+
+MESSAGE_SECONDS = 60
+MAX_MESSAGE_CHARS = 5000
+
+
+def message_text(text: Any) -> str:
+    """Escape invisible and direction characters on every line, keep real line breaks, clip."""
+    text = text if isinstance(text, str) else str(text)
+    lines = [_printable(line) for line in text[:MAX_MESSAGE_CHARS].replace("\r\n", "\n").split("\n")]
+    out = "\n".join(lines)
+    return out + ("\n... (cut short)" if len(text) > MAX_MESSAGE_CHARS else "")
+
+
+def show_message_window(text: str, timeout_seconds: float = MESSAGE_SECONDS) -> bool:
+    """A read-only window with the reply. Closes on Esc, the Close button, or after a minute."""
+    import tkinter as tk
+
+    root = tk.Tk()
+    root.title("J.A.R.V.I.S")
+    root.attributes("-topmost", True)
+    frame = tk.Frame(root, padx=16, pady=14)
+    frame.pack(fill="both", expand=True)
+    box = tk.Text(frame, width=70, height=min(20, max(4, text.count("\n") + 2)), wrap="word",
+                  font=("Consolas", 10), relief="groove", padx=8, pady=6)
+    box.insert("1.0", text)
+    box.config(state="disabled")                 # read-only: nothing typed here goes anywhere
+    box.pack(fill="both", expand=True)
+    tk.Button(frame, text="Close  (Esc)", width=16, command=root.destroy).pack(pady=(10, 0))
+    root.bind("<Escape>", lambda e: root.destroy())
+    root.after(int(timeout_seconds * 1000), root.destroy)
+    root.lift()
+    root.focus_force()
+    root.mainloop()
+    return True
+
+
+def _message_child(stdin_text: str, show: Callable[[str, float], bool] = show_message_window) -> int:
+    """Exit codes: 0 shown, 2 bad request, 3 the window failed."""
+    try:
+        request = json.loads(stdin_text)
+        text, timeout = request["text"], float(request["timeout"])
+        # escaping can make each character up to 10 long, so allow for that, and no more
+        if not (isinstance(text, str) and len(text) <= MAX_MESSAGE_CHARS * 10 + 100 and 1 <= timeout <= 600):
+            return 2
+    except Exception:
+        return 2
+    try:
+        show(text, timeout)
+    except Exception:
+        return 3
+    return 0
+
+
+def show_message(text: Any, launcher: Callable[..., Any] | None = None,
+                 timeout: float = MESSAGE_SECONDS) -> bool:
+    """Show a reply on screen in its own short-lived process, without waiting for it.
+    Nothing is written to disk. Returns False if the window could not be started."""
+    payload = json.dumps({"text": message_text(text), "timeout": timeout})
+    try:
+        if launcher is not None:
+            launcher(payload)
+            return True
+        proc = subprocess.Popen([sys.executable, "-m", "backend.ui.confirm", "--message"], stdin=subprocess.PIPE,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, text=True, cwd=_PROJECT_ROOT)
+        proc.stdin.write(payload)
+        proc.stdin.close()
+        return True
+    except Exception:
+        return False
+
+
 def popup_confirm(tool_name: str, args: dict[str, Any]) -> bool:
     """The confirmation function the gate uses for high-risk tools."""
     try:
@@ -239,6 +313,8 @@ def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     if argv == ["--window"]:
         return _child(sys.stdin.read(MAX_REQUEST_CHARS))
+    if argv == ["--message"]:
+        return _message_child(sys.stdin.read(MAX_MESSAGE_CHARS * 70))
     if argv == ["--demo"]:
         allowed = popup_confirm("demo_delete_file", {"name": "report", "note": "line one\nline two (only a demo)"})
         print("ALLOWED" if allowed else "DENIED")

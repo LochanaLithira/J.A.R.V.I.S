@@ -11,6 +11,10 @@ WORKSPACE = Path.home() / "jarvis_workspace"
 _base = Path(os.environ.get("LOCALAPPDATA", str(Path.home())))
 AUDIT_LOG = _base / "jarvis" / "audit.jsonl"
 
+# The background app's error log: error types and fixed messages only, never your words.
+# Capped at about 3 MB in total (1 MB plus two older copies).
+APP_LOG = _base / "jarvis" / "jarvis.log"
+
 # Short name -> full path of the program. Add apps one at a time, with full paths.
 ALLOWED_APPS = {
     "notepad": r"C:\Windows\System32\notepad.exe",
@@ -23,7 +27,8 @@ RATE_LIMIT_WINDOW_SECONDS = 60.0
 
 # The AI model. Model names change often, so check Google AI Studio for the current
 # free Flash or Flash-Lite names, and edit this line if the name stops working.
-GEMINI_MODELS = ("gemini-3.1-flash-lite", "gemini-3.5-flash-lite")
+# The first is tried first; measured from this laptop, 3.5 answered in ~0.8-1.1 s and 3.1 in ~1.2-1.7 s.
+GEMINI_MODELS = ("gemini-3.5-flash-lite", "gemini-3.1-flash-lite")
 GEMINI_TIMEOUT_SECONDS = 15.0
 
 
@@ -63,3 +68,12 @@ STT_LANGUAGE = "en"
 LISTEN_MAX_SECONDS = 15.0        # longest command
 LISTEN_NO_SPEECH_SECONDS = 5.0   # give up if you don't start speaking within this time
 LISTEN_END_SILENCE_SECONDS = 0.8 # this much quiet means you've finished
+
+# ---- Follow-ups: answering without "hey jarvis" ----
+# When J.A.R.V.I.S asks you a question ("Which app, sir?"), it chimes and listens for your answer.
+FOLLOW_UP_ON_QUESTION = True
+# Alexa-style: also listen for a few seconds after EVERY reply. Off by default, because anything
+# said in that window (by anyone, or a TV) is sent to Groq and may be acted on.
+FOLLOW_UP_ALWAYS = False
+FOLLOW_UP_SECONDS = 5.0          # how long to wait for you to start speaking
+FOLLOW_UP_MAX_TURNS = 3          # after this many follow-ups in a row, say "hey jarvis" again
