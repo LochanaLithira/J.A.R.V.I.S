@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import logging
 import logging.handlers
+import queue
 import sys
 import threading
 import time
@@ -34,15 +35,18 @@ from .brain import Brain, BrainError, GeminiBrain, Turn
 from .credentials import CredentialError, get_secret
 from .flow import Flow, FlowError
 from .gate.gate import Gate
+from .gate.models import Result
+from .tools.timers import TimerService
 from .voice.listen import CommandRecorder, GroqTranscriber, Heard, SileroVAD, SpeechInput
 from .voice.keepalive import warm_all
 from .voice.speak import FishSpeaker, Voice
-from .voice.triggers import (ClapDetector, Microphone, TriggerError, Triggers, WakeEvent, WakeWordDetector,
-                             pick_microphone, play_chime, play_close_chime, play_done_chime)
+from .voice.triggers import (ALARM_CHIME, ClapDetector, Microphone, TriggerError, Triggers, WakeEvent,
+                             WakeWordDetector, pick_microphone, play_chime, play_close_chime, play_done_chime)
 
 log = logging.getLogger("jarvis")
 
 MIC_IDLE_SECONDS = 5.0           # a microphone silent at driver level for this long is reopened
+TIMER_DONE_LINE = "Sir, your timer is done."
 RETRY_SECONDS = 5.0              # wait before retrying after a problem (a missing mic, for example)
 
 
@@ -177,12 +181,15 @@ class Assistant:
                  follow_up_on_question: bool = True, follow_up_always: bool = False,
                  follow_up_seconds: float = 5.0, follow_up_max_turns: int = 3,
                  close_chime: Callable[[], None] = play_close_chime,
+                 alarm: Callable[[], None] | None = None,
                  retry_seconds: float = RETRY_SECONDS, mic_idle_seconds: float = MIC_IDLE_SECONDS):
         self._triggers, self._speech, self._get_flow, self._voice = triggers, speech, get_flow, voice
         self._warm = warm                     # reconnect to the cloud services while you speak
         self._follow_on_question, self._follow_always = follow_up_on_question, follow_up_always
         self._follow_seconds, self._follow_max = follow_up_seconds, follow_up_max_turns
         self._close_chime = close_chime
+        self._alarm = alarm or _play_alarm_and_wait
+        self._announcements: queue.Queue[str] = queue.Queue()   # finished timers, from the timer thread
         self._device, self._mic_factory, self._chime = device, mic_factory, chime
         self._show_text, self._on_status, self._on_notice, self._out = show_text, on_status, on_notice, out
         self._retry, self._mic_idle = retry_seconds, mic_idle_seconds
@@ -218,6 +225,32 @@ class Assistant:
     def set_asleep(self, asleep: bool) -> None:
         """The laptop is going to sleep (True) or has woken up (False). Waking also reopens the mic."""
         self._change("_asleep", asleep)
+
+    def announce(self, label: str) -> None:
+        """A timer finished (called from the timer thread). Handled by the loop within ~0.1 s."""
+        self._announcements.put(label if isinstance(label, str) else "")
+
+    def _announce_pending(self, mic: Any = None) -> None:
+        while True:
+            try:
+                label = self._announcements.get_nowait()
+            except queue.Empty:
+                return
+            log.info("timer finished")                     # the label is your words: never logged
+            self._alarm()
+            spoken = False
+            if self._voice is not None:
+                self._triggers.set_muted(True)
+                try:
+                    spoken = self._voice.say(Result(True, TIMER_DONE_LINE), wait=True)
+                finally:
+                    self._triggers.set_muted(False)
+            text = f"Timer done: {label}" if label else "Your timer is done."
+            self._say_out(f"TIMER: {text}")
+            if self._show_text is not None and (label or not spoken):
+                self._show_text(text)                     # the label is shown, never spoken
+            if mic is not None:
+                mic.drain()
 
     def listening_allowed(self) -> bool:
         return not (self._paused or self._locked or self._asleep or self._stop.is_set())
@@ -287,6 +320,7 @@ class Assistant:
         while not self._stop.is_set():
             if not self.listening_allowed():
                 self._set_status(self._idle_status())   # the microphone is closed here
+                self._announce_pending()                # timers still ring while paused
                 self._interrupt.wait(0.5)
                 self._interrupt.clear()
                 continue
@@ -304,6 +338,9 @@ class Assistant:
         for chunk in mic.chunks(self._interrupt, idle_timeout=self._mic_idle):
             if not self.listening_allowed():
                 return
+            if not self._announcements.empty():
+                self._announce_pending(mic)
+                self._triggers.reset()
             event = self._triggers.process(chunk)
             if event is None:
                 if self._near is not None:
@@ -490,6 +527,13 @@ def lower_priority() -> bool:
     return bool(kernel32.SetPriorityClass(kernel32.GetCurrentProcess(), 0x00004000))
 
 
+def _play_alarm_and_wait() -> None:
+    """Play the timer alarm to the end (the voice that follows would otherwise cut it off)."""
+    from .voice.speak import WinsoundPlayer
+
+    WinsoundPlayer().play(ALARM_CHIME)
+
+
 def _prepare(get_flow: Callable[[], Flow]) -> None:
     """Load the AI library and build the flow now, so your first command doesn't wait ~2 s for it.
     No network call is made. A missing key is reported by startup_checks instead."""
@@ -518,7 +562,8 @@ def main() -> int:
     lower_priority()
     log.info("starting")
 
-    gate = build_gate(confirm=popup_confirm)
+    timers = TimerService()
+    gate = build_gate(confirm=popup_confirm, timers=timers)
     voice = make_voice(report=log.warning)
     get_flow = make_flow_getter(gate, make_brain_getter())
     threading.Thread(target=_prepare, args=(get_flow,), name="jarvis-prepare", daemon=True).start()
@@ -535,6 +580,11 @@ def main() -> int:
         log.warning("cannot listen: %s", exc)
         tray.set_status(Status.PROBLEM, str(exc))
         tray.notify("J.A.R.V.I.S can't listen yet", str(exc))
+    if "a" in holder:
+        timers.on_fire = holder["a"].announce
+    else:                                # no listening loop: still ring, label on screen only
+        timers.on_fire = lambda label: (tray.notify("J.A.R.V.I.S", "Your timer is done."),
+                                        show_message(f"Timer done: {label}") if label else None)
     problems = startup_checks()
     if problems:
         tray.notify("J.A.R.V.I.S needs setting up", "\n".join(problems))
@@ -543,6 +593,7 @@ def main() -> int:
     try:
         tray.run()                       # the Windows message loop; returns when you choose Quit
     finally:
+        timers.stop()
         if "a" in holder:
             holder["a"].stop()
         voice.finish()
