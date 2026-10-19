@@ -66,6 +66,36 @@ def test_a_plain_reply_is_spoken_and_nothing_runs(tmp_path):
     assert events(tmp_path) == ["command", "said"]
 
 
+@pytest.mark.parametrize("text, question", [("Which app, sir?", True), ("Which app?  ", True),
+                                            ("Done, sir.", False), ("Sorry, I can't do that.", False)])
+def test_replies_that_ask_something_are_marked(tmp_path, text, question):
+    result = Flow(ScriptedBrain(BrainReply(text=text)), make_gate(tmp_path)).run("do it")
+    assert result.question is question
+
+
+def test_tool_results_are_never_marked_as_questions(tmp_path):
+    gate = make_gate(tmp_path)
+    gate.execute("create_note", {"title": "q", "text": "is this a question?"})
+    result = Flow(ScriptedBrain(action("read_note", title="q")), gate).run("read note q")
+    assert result.message == "is this a question?" and result.question is False
+
+
+def test_history_reaches_the_brain_only_when_answering(tmp_path):
+    from backend.brain import Turn
+
+    class HistoryBrain(ScriptedBrain):
+        def propose(self, command, tool_specs, history=()):
+            self.calls.append((command, history))
+            return self.reply
+
+    brain = HistoryBrain(action("open_app", name="notepad"))
+    flow = Flow(brain, make_gate(tmp_path))
+    turn = Turn("open an app", "Which app, sir?")
+    assert flow.run("notepad", (turn,)).ok
+    assert flow.run("open notepad").ok
+    assert brain.calls == [("notepad", (turn,)), ("open notepad", ())]
+
+
 def test_an_invented_tool_is_refused_by_the_gate_and_logged(tmp_path):
     result = Flow(ScriptedBrain(action("format_disk")), make_gate(tmp_path)).run("wipe it")
     assert not result.ok and events(tmp_path) == ["command", "proposed", "denied"]

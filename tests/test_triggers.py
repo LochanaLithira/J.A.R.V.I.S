@@ -405,52 +405,34 @@ def test_help_mentions_listen(console):
 
 
 def test_near_misses_reported_only_below_threshold():
-    near = cli._NearMisses(0.25)
+    from backend.main import NearMisses
+
+    near = NearMisses(0.25)
     seen = [near.update(s, False) for s in (0.0, 0.18, 0.2, 0.0, 0.0, 0.0)]
     assert seen[-1] == 0.2 and seen[:-1] == [None] * 5
     seen = [near.update(s, s > 0.25) for s in (0.4, 0.0, 0.0, 0.0)]
     assert seen == [None] * 4                                   # a real wake is not a near miss
 
 
-def test_listener_wiring_chimes_and_prints(monkeypatch, tmp_path):
-    audio = slices(np.zeros(CHUNK * 3))
+def test_console_listen_uses_the_shared_loop(monkeypatch, tmp_path):
+    seen = {}
 
-    class Mic:
-        name = "Test Mic"
-
-        def __init__(self, device):
-            assert device == 5
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *a):
-            pass
-
-        def chunks(self):
-            yield from audio
+    class FakeAssistant:
+        def run(self):
             raise KeyboardInterrupt
 
-        def drain(self):
-            return 0
+    def fake_build(audit, get_flow, voice, **kw):
+        seen.update(kw)
+        return FakeAssistant()
 
-    chimes = []
-    monkeypatch.setattr(cli, "WakeWordDetector", lambda d: FakeWake([0.0, 0.9, 0.0]))
-    monkeypatch.setattr(cli, "ClapDetector", lambda *a, **k: FakeClap([False] * 3))
-    monkeypatch.setattr(cli, "pick_microphone", lambda name: 5)
-    monkeypatch.setattr(cli, "Microphone", Mic)
-    monkeypatch.setattr(cli, "play_chime", lambda: chimes.append(1))
-
-    class NoSpeech:
-        def hear(self, chunks):
-            return cli.Heard(reason="no speech")
-
-    monkeypatch.setattr(cli, "_make_speech", lambda audit: NoSpeech())
+    monkeypatch.setattr(cli, "build_assistant", fake_build)
     lines = []
-    audit = AuditLog(tmp_path / "log.jsonl")
-    listen = cli._make_listener(audit, out=lines.append)()
+    listen = cli._make_listener(AuditLog(tmp_path / "log.jsonl"), out=lines.append)()
     with pytest.raises(KeyboardInterrupt):
         listen()
-    assert chimes == [1]
-    assert lines[0].startswith("Listening on Test Mic") and "WAKE: hey jarvis (score 0.90)" in lines
-    assert "wake" in audit.path.read_text()
+    assert seen["out"] == lines.append and "show_text" not in seen    # the console prints instead of popups
+    seen["on_status"](cli.Status.LISTENING, "")
+    seen["on_status"](cli.Status.LISTENING, "")
+    seen["on_status"](cli.Status.PROBLEM, "I couldn't open the microphone.")
+    assert lines[0].startswith("Listening.") and len(lines) == 2
+    assert lines[1] == "(problem: I couldn't open the microphone.)"

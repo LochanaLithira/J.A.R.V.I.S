@@ -19,7 +19,7 @@ from typing import Any, Callable, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
-from .brain import Brain, BrainError, BrainReply, clean_command
+from .brain import Brain, BrainError, BrainReply, Turn, clean_command
 from .gate.gate import Gate
 from .gate.models import Result
 
@@ -33,6 +33,7 @@ class FlowError(Exception):
 
 class _State(TypedDict, total=False):
     command: Any
+    history: tuple
     reply: BrainReply
     result: Result
 
@@ -66,9 +67,10 @@ class Flow:
         graph.add_edge("guard", END)
         return graph.compile()              # no checkpointer: nothing is persisted
 
-    def run(self, command: Any) -> Result:
-        """Take one command through the whole flow and return what to tell the user."""
-        return self._graph.invoke({"command": command})["result"]
+    def run(self, command: Any, history: tuple[Turn, ...] = ()) -> Result:
+        """Take one command through the whole flow and return what to tell the user. `history`
+        is the one earlier exchange, used only when you are answering J.A.R.V.I.S's question."""
+        return self._graph.invoke({"command": command, "history": tuple(history)})["result"]
 
     # ---- nodes ----------------------------------------------------------------
     def _ai_rate_limited(self) -> bool:
@@ -86,7 +88,11 @@ class Flow:
                 raise BrainError("Too many requests. Please wait a moment.")
             command = clean_command(state.get("command"))
             self._audit.record("command", text=command)
-            reply = self._brain.propose(command, self._gate.tool_specs())
+            history = state.get("history") or ()
+            if history:
+                reply = self._brain.propose(command, self._gate.tool_specs(), history=history)
+            else:
+                reply = self._brain.propose(command, self._gate.tool_specs())
             if not isinstance(reply, BrainReply):
                 raise BrainError("The assistant gave an unusable answer.")
         except BrainError as exc:
@@ -98,7 +104,7 @@ class Flow:
 
         if reply.proposal is None:
             self._audit.record("said", text=reply.text)
-            return {"result": Result(True, reply.text)}
+            return {"result": Result(True, reply.text, question=reply.text.rstrip().endswith("?"))}
         return {"reply": reply}
 
     @staticmethod
