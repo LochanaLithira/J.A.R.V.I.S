@@ -53,3 +53,13 @@ WAKE_COOLDOWN_SECONDS = 1.5      # after a wake, ignore triggers for this long
 # they fade. The listen command prints the level of each clap it hears, so you can tune it.
 CLAP_ENABLED = True
 CLAP_MIN_LEVEL = 600
+
+
+# ---- Speech input (Groq Whisper, free tier resets daily) ----
+# After a wake-up, only the part where you speak is sent; silence is trimmed on this laptop.
+# Set the key once with:  python -m backend.credentials set stt_api_key
+STT_MODEL = "whisper-large-v3-turbo"
+STT_LANGUAGE = "en"
+LISTEN_MAX_SECONDS = 15.0        # longest command
+LISTEN_NO_SPEECH_SECONDS = 5.0   # give up if you don't start speaking within this time
+LISTEN_END_SILENCE_SECONDS = 0.8 # this much quiet means you've finished
