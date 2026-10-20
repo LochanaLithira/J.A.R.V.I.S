@@ -70,6 +70,13 @@ class TimerService:
                 for t in timers]
         return "Timers: " + "; ".join(rows) + "."
 
+    def snapshot(self) -> list[dict]:
+        """Running timers for the screen: label, seconds left, and total seconds."""
+        now = self._clock()
+        with self._lock:
+            timers = sorted(self._timers, key=lambda t: t.due)
+        return [{"label": t.label, "remaining": max(0, round(t.due - now)), "total": t.seconds} for t in timers]
+
     def cancel(self, label: str) -> str:
         wanted = label.strip().lower()
         with self._lock:

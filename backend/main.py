@@ -136,6 +136,17 @@ def is_stop_phrase(text: str) -> bool:
     return plain in _STOP_PHRASES
 
 
+def sound_level(chunk: Any) -> float:
+    """0 to 1 loudness of an audio slice, shaped so normal speech sits around the middle."""
+    import numpy as np
+
+    samples = np.asarray(chunk, dtype=np.float64)
+    if samples.size == 0:
+        return 0.0
+    rms = float(np.sqrt(np.mean(samples * samples)))
+    return min(1.0, (rms / 1800.0) ** 0.7)
+
+
 class NearMisses:
     """Spots wake-word score bumps that rose but stayed under the threshold (console tuning aid)."""
 
@@ -182,6 +193,8 @@ class Assistant:
                  follow_up_seconds: float = 5.0, follow_up_max_turns: int = 3,
                  close_chime: Callable[[], None] = play_close_chime,
                  alarm: Callable[[], None] | None = None,
+                 on_event: Callable[[str, dict], None] | None = None,
+                 on_level: Callable[[float], None] | None = None,
                  retry_seconds: float = RETRY_SECONDS, mic_idle_seconds: float = MIC_IDLE_SECONDS):
         self._triggers, self._speech, self._get_flow, self._voice = triggers, speech, get_flow, voice
         self._warm = warm                     # reconnect to the cloud services while you speak
@@ -190,6 +203,7 @@ class Assistant:
         self._close_chime = close_chime
         self._alarm = alarm or _play_alarm_and_wait
         self._announcements: queue.Queue[str] = queue.Queue()   # finished timers, from the timer thread
+        self._on_event, self._on_level = on_event, on_level    # feed the on-demand screen
         self._device, self._mic_factory, self._chime = device, mic_factory, chime
         self._show_text, self._on_status, self._on_notice, self._out = show_text, on_status, on_notice, out
         self._retry, self._mic_idle = retry_seconds, mic_idle_seconds
@@ -237,6 +251,7 @@ class Assistant:
             except queue.Empty:
                 return
             log.info("timer finished")                     # the label is your words: never logged
+            self._emit("timer", label=label)
             self._alarm()
             spoken = False
             if self._voice is not None:
@@ -292,6 +307,27 @@ class Assistant:
         if self._out is not None:
             self._out(line)
 
+    def _emit(self, kind: str, **data: Any) -> None:
+        """Tell the screen what just happened (it may include your words: the screen is local)."""
+        if self._on_event is not None:
+            try:
+                self._on_event(kind, data)
+            except Exception as exc:
+                log.error("screen event failed: %s", type(exc).__name__)
+
+    def _level(self, chunk: Any) -> None:
+        if self._on_level is not None:
+            try:
+                self._on_level(sound_level(chunk))
+            except Exception:
+                pass
+
+    def _metered(self, chunks: Any) -> Any:
+        """Pass microphone slices through, reporting the sound level to the screen on the way."""
+        for chunk in chunks:
+            self._level(chunk)
+            yield chunk
+
     def run(self) -> None:
         """The watchdog: run the loop, and restart it after any unexpected error."""
         backoff = 1.0
@@ -341,6 +377,7 @@ class Assistant:
             if not self._announcements.empty():
                 self._announce_pending(mic)
                 self._triggers.reset()
+            self._level(chunk)
             event = self._triggers.process(chunk)
             if event is None:
                 if self._near is not None:
@@ -365,13 +402,16 @@ class Assistant:
                 log.error("warm-up failed: %s", type(exc).__name__)
         detail = f" (score {event.score:.2f})" if event.score is not None else ""
         self._say_out(f"WAKE: {event.source}{detail}")
+        self._emit("wake", source=event.source, score=event.score)
         t0 = time.monotonic()
         if self._speech is None:
             heard = Heard(error="Speech input is not set up.")
         else:
-            heard = self._speech.hear(mic.chunks(self._interrupt, idle_timeout=self._mic_idle))
+            self._emit("hearing", follow_up=False)
+            heard = self._speech.hear(self._metered(mic.chunks(self._interrupt, idle_timeout=self._mic_idle)))
         heard_s = time.monotonic() - t0
         self._say_out(describe_heard(heard))
+        self._emit_heard(heard)
         if heard.error:
             self._notice(heard.error)
         elif heard.text:
@@ -403,9 +443,11 @@ class Assistant:
             mic.drain()                          # never record J.A.R.V.I.S's own voice
             self._chime()
             self._say_out("(listening for your answer...)")
-            heard = self._speech.hear(mic.chunks(self._interrupt, idle_timeout=self._mic_idle),
+            self._emit("hearing", follow_up=True)
+            heard = self._speech.hear(self._metered(mic.chunks(self._interrupt, idle_timeout=self._mic_idle)),
                                       no_speech_seconds=self._follow_seconds)
             self._say_out(describe_heard(heard))
+            self._emit_heard(heard)
             if heard.error:
                 self._notice(heard.error)
                 return
@@ -415,6 +457,14 @@ class Assistant:
             _, _, result = self._act(heard.text, history)
             said = heard.text
 
+    def _emit_heard(self, heard: Heard) -> None:
+        if heard.error:
+            self._emit("hear_error", message=heard.error)
+        elif heard.text:
+            self._emit("heard", text=heard.text)
+        else:
+            self._emit("nothing", reason=heard.reason)
+
     def _act(self, text: str, history: tuple[Turn, ...] = ()) -> tuple[float, float, Any]:
         """Run a heard command like say. Returns (seconds for AI and action, seconds speaking,
         the result, or None if nothing ran)."""
@@ -423,22 +473,28 @@ class Assistant:
             self._say_out("NO: The AI is not set up.")
             self._notice("The AI is not set up.")
             return 0.0, 0.0, None
+        self._emit("thinking")
         try:
             flow = self._get_flow()
             result = flow.run(text, history) if history else flow.run(text)
         except (BrainError, CredentialError, FlowError) as exc:
             self._say_out(f"NO: {exc}")
             self._notice(str(exc))
+            self._emit("reply", text=str(exc), ok=False, private=False)
             return time.monotonic() - t0, 0.0, None
         t1 = time.monotonic()
         self._say_out(("OK: " if result.ok else "NO: ") + result.message)
+        self._emit("reply", text=result.message, ok=bool(result.ok),
+                   private=getattr(result, "private", True) is not False)
         spoken = False
         if self._voice is not None:
             self._triggers.set_muted(True)       # J.A.R.V.I.S's own voice must never wake it
+            self._emit("speaking")
             try:
                 spoken = self._voice.say(result, wait=True)
             finally:
                 self._triggers.set_muted(False)
+                self._emit("spoke")
         if self._show_text is not None and (getattr(result, "private", True) or not spoken):
             self._show_text(result.message)      # "it's on your screen" must be true
         return t1 - t0, time.monotonic() - t1, result
@@ -447,7 +503,9 @@ class Assistant:
 def build_assistant(audit: Any, get_flow: Callable[[], Flow] | None, voice: Voice | None, *,
                     out: Callable[[str], None] | None = None, show_text: Callable[[str], Any] | None = None,
                     on_status: Callable[[Status, str], None] | None = None,
-                    on_notice: Callable[[str], None] | None = None) -> Assistant:
+                    on_notice: Callable[[str], None] | None = None,
+                    on_event: Callable[[str, dict], None] | None = None,
+                    on_level: Callable[[float], None] | None = None) -> Assistant:
     """Everything the loop needs, from config.py. Raises TriggerError if the models or the
     microphone named in config.py are missing."""
     wake = WakeWordDetector(config.MODELS_DIR)
@@ -461,7 +519,8 @@ def build_assistant(audit: Any, get_flow: Callable[[], Flow] | None, voice: Voic
                      pick_microphone(config.MIC_DEVICE), show_text=show_text, on_status=on_status,
                      on_notice=on_notice, out=out, warm=warm_all,
                      follow_up_on_question=config.FOLLOW_UP_ON_QUESTION, follow_up_always=config.FOLLOW_UP_ALWAYS,
-                     follow_up_seconds=config.FOLLOW_UP_SECONDS, follow_up_max_turns=config.FOLLOW_UP_MAX_TURNS)
+                     follow_up_seconds=config.FOLLOW_UP_SECONDS, follow_up_max_turns=config.FOLLOW_UP_MAX_TURNS,
+                     on_event=on_event, on_level=on_level)
 
 
 # ---------------------------------------------------------------------------
@@ -470,6 +529,65 @@ def build_assistant(audit: Any, get_flow: Callable[[], Flow] | None, voice: Voic
 
 _KEYS = (("gemini_api_key", "the AI (Gemini)"), ("stt_api_key", "hearing commands (Groq)"),
          ("fish_api_key", "the voice (Fish Audio)"))
+
+
+def key_status(get: Callable[[str], str | None] = get_secret) -> dict[str, bool]:
+    """Which keys are stored (True/False). Never reveals a key."""
+    status = {}
+    for name, _ in _KEYS:
+        try:
+            status[name] = bool(get(name))
+        except CredentialError:
+            status[name] = False
+    return status
+
+
+_HUD_STATE = {Status.STARTING: "starting", Status.LISTENING: "listening", Status.WORKING: "working",
+              Status.PAUSED: "paused", Status.LOCKED: "locked", Status.ASLEEP: "asleep",
+              Status.PROBLEM: "problem", Status.STOPPED: "paused"}
+_STATUS_ACTIVITY = {Status.PAUSED: ("listening paused", "warn"), Status.LOCKED: ("Windows locked: microphone off", "warn"),
+                    Status.ASLEEP: ("asleep: microphone off", "warn")}
+_NOTHING_ACTIVITY = {"no speech": "heard nothing", "too short": "too short to understand", "stopped": "stopped"}
+
+
+def screen_feed(screen: Any) -> tuple[Callable[[Status, str], None], Callable[[str, dict], None]]:
+    """Turn the loop's status changes and events into updates for the on-demand screen."""
+
+    def on_status(status: Status, problem: str) -> None:
+        screen.set_state(_HUD_STATE.get(status, "listening"), problem)
+        if status is Status.PROBLEM and problem:
+            screen.add_activity(problem, "bad")
+        elif status in _STATUS_ACTIVITY:
+            screen.add_activity(*_STATUS_ACTIVITY[status])
+
+    def on_event(kind: str, data: dict) -> None:
+        if kind == "wake":
+            score = data.get("score")
+            screen.add_activity(f"wake · {data.get('source', '')}" + (f" {score:.2f}" if score is not None else ""))
+        elif kind == "hearing":
+            screen.set_state("hearing", "your answer" if data.get("follow_up") else "go ahead")
+        elif kind == "heard":
+            screen.add_message("you", data.get("text", ""))
+        elif kind == "nothing":
+            screen.add_activity(_NOTHING_ACTIVITY.get(data.get("reason", ""), "heard nothing"), "warn")
+        elif kind == "hear_error":
+            screen.add_message("system", data.get("message", ""))
+            screen.add_activity("couldn't hear the command", "bad")
+        elif kind == "thinking":
+            screen.set_state("working", "thinking")
+        elif kind == "reply":
+            screen.add_message("jarvis", data.get("text", ""), private=bool(data.get("private")))
+            screen.add_activity("done" if data.get("ok") else "not done", "ok" if data.get("ok") else "warn")
+            screen.refresh_timers()
+        elif kind == "speaking":
+            screen.set_state("speaking")
+        elif kind == "timer":
+            label = data.get("label", "")
+            screen.add_message("system", f"Timer done: {label}" if label else "Your timer is done.")
+            screen.add_activity("timer finished")
+            screen.refresh_timers()
+
+    return on_status, on_event
 
 
 def startup_checks(get: Callable[[str], str | None] = get_secret) -> list[str]:
@@ -568,17 +686,48 @@ def main() -> int:
     get_flow = make_flow_getter(gate, make_brain_getter())
     threading.Thread(target=_prepare, args=(get_flow,), name="jarvis-prepare", daemon=True).start()
 
+    from .ui.window import ScreenLink
+
     holder: dict[str, Assistant] = {}
-    tray = Tray(on_toggle_pause=lambda: holder["a"].toggle_pause() if "a" in holder else None,
+
+    def toggle_pause() -> None:
+        if "a" in holder:
+            holder["a"].toggle_pause()
+
+    def systems() -> list[dict]:
+        keys = key_status()
+        a = holder.get("a")
+        return [{"name": "Microphone", "ok": a is not None and a.status is not Status.PROBLEM},
+                {"name": "Wake word", "ok": a is not None},
+                {"name": "Gemini", "ok": keys.get("gemini_api_key", False)},
+                {"name": "Groq", "ok": keys.get("stt_api_key", False)},
+                {"name": "Fish Audio", "ok": keys.get("fish_api_key", False)},
+                {"name": "Audit chain intact", "ok": gate.audit.verify()[0]}]
+
+    screen = ScreenLink(on_command=lambda cmd: toggle_pause() if cmd == "toggle_pause" else None,
+                        get_systems=systems, get_timers=timers.snapshot)
+    feed_status, feed_event = screen_feed(screen)
+    tray = Tray(on_toggle_pause=toggle_pause,
                 is_paused=lambda: holder["a"].paused if "a" in holder else False,
                 on_lock=lambda locked: holder["a"].set_locked(locked) if "a" in holder else None,
-                on_sleep=lambda asleep: holder["a"].set_asleep(asleep) if "a" in holder else None)
+                on_sleep=lambda asleep: holder["a"].set_asleep(asleep) if "a" in holder else None,
+                on_open=screen.open)
+
+    def on_status(status: Status, problem: str) -> None:
+        tray.set_status(status, problem)
+        feed_status(status, problem)
+
+    def show_text(text: str) -> None:          # the screen already shows it when it is open
+        if not screen.is_open:
+            show_message(text)
+
     try:
-        holder["a"] = build_assistant(gate.audit, get_flow, voice, show_text=show_message,
-                                      on_status=tray.set_status, on_notice=lambda m: tray.notify("J.A.R.V.I.S", m))
+        holder["a"] = build_assistant(gate.audit, get_flow, voice, show_text=show_text, on_status=on_status,
+                                      on_notice=lambda m: tray.notify("J.A.R.V.I.S", m),
+                                      on_event=feed_event, on_level=screen.set_level)
     except TriggerError as exc:
         log.warning("cannot listen: %s", exc)
-        tray.set_status(Status.PROBLEM, str(exc))
+        on_status(Status.PROBLEM, str(exc))
         tray.notify("J.A.R.V.I.S can't listen yet", str(exc))
     if "a" in holder:
         timers.on_fire = holder["a"].announce
@@ -594,6 +743,7 @@ def main() -> int:
         tray.run()                       # the Windows message loop; returns when you choose Quit
     finally:
         timers.stop()
+        screen.close()
         if "a" in holder:
             holder["a"].stop()
         voice.finish()

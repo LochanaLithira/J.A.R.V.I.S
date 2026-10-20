@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "screen-preview",
+      "runtimeExecutable": "D:\\Personal Projects\\J.A.R.V.I.S\\.venv\\Scripts\\python.exe",
+      "runtimeArgs": ["-m", "http.server", "8765", "--bind", "127.0.0.1", "--directory", "backend/ui/screen"],
+      "port": 8765
+    }
+  ]
+}

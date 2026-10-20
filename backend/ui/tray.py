@@ -2,7 +2,8 @@
 
 - The icon's colour shows what J.A.R.V.I.S is doing: green listening, blue working, grey paused
   (microphone off), red problem, amber starting. Hovering shows the same in words.
-- Right-click (or left-click) for the menu: Pause / Resume listening, and Quit.
+- Left-click opens the J.A.R.V.I.S screen. Right-click for the menu: Open J.A.R.V.I.S,
+  Pause / Resume listening, and Quit.
 - It owns a hidden window that receives Windows' own events: the screen being locked or
   unlocked, and the laptop going to sleep or waking. J.A.R.V.I.S uses these to close the
   microphone while you're away.
@@ -164,14 +165,15 @@ def _load_api() -> Any:
 class Tray:
     WM_TRAY = WM_APP + 1               # mouse events on the icon
     WM_REFRESH = WM_APP + 2            # "status or notice changed" from another thread
-    CMD_PAUSE, CMD_QUIT = 1, 2
+    CMD_PAUSE, CMD_QUIT, CMD_OPEN = 1, 2, 3
 
     def __init__(self, on_toggle_pause: Callable[[], None] | None = None,
                  is_paused: Callable[[], bool] | None = None,
                  on_lock: Callable[[bool], None] | None = None,
                  on_sleep: Callable[[bool], None] | None = None,
-                 on_quit: Callable[[], None] | None = None, show_icon: bool = True):
-        self._on_toggle_pause, self._is_paused = on_toggle_pause, is_paused
+                 on_quit: Callable[[], None] | None = None, show_icon: bool = True,
+                 on_open: Callable[[], Any] | None = None):
+        self._on_toggle_pause, self._is_paused, self._on_open = on_toggle_pause, is_paused, on_open
         self._on_lock, self._on_sleep, self._on_quit = on_lock, on_sleep, on_quit
         self._show_icon = show_icon
         self._lock = threading.Lock()
@@ -253,7 +255,9 @@ class Tray:
         api = _load_api()
         try:
             if msg == self.WM_TRAY:
-                if lparam in (WM_RBUTTONUP, WM_LBUTTONUP, WM_CONTEXTMENU):
+                if lparam == WM_LBUTTONUP and self._on_open is not None:
+                    self._on_open()                          # left-click: open the screen
+                elif lparam in (WM_RBUTTONUP, WM_LBUTTONUP, WM_CONTEXTMENU):
                     self._show_menu()
                 return 0
             if msg == self.WM_REFRESH:
@@ -336,18 +340,26 @@ class Tray:
             nid.dwInfoFlags = NIIF_INFO
             api.Shell_NotifyIconW(NIM_MODIFY, ctypes.byref(nid))
 
-    def menu_labels(self) -> list[str]:
+    def menu_items(self) -> list[tuple[int, str]]:
+        """The menu, top to bottom, as (command, label). 0 is a separator."""
         paused = bool(self._is_paused()) if self._is_paused is not None else False
-        return ["Resume listening" if paused else "Pause listening", "Quit J.A.R.V.I.S"]
+        items = [(self.CMD_OPEN, "Open J.A.R.V.I.S")] if self._on_open is not None else []
+        items += [(self.CMD_PAUSE, "Resume listening" if paused else "Pause listening"), (0, ""),
+                  (self.CMD_QUIT, "Quit J.A.R.V.I.S")]
+        return items
+
+    def menu_labels(self) -> list[str]:
+        return [label for cmd, label in self.menu_items() if cmd]
 
     def _show_menu(self) -> None:
         api = _load_api()
-        pause_label, quit_label = self.menu_labels()
         menu = api.CreatePopupMenu()
         try:
-            api.AppendMenuW(menu, MF_STRING, self.CMD_PAUSE, pause_label)
-            api.AppendMenuW(menu, MF_SEPARATOR, 0, None)
-            api.AppendMenuW(menu, MF_STRING, self.CMD_QUIT, quit_label)
+            for cmd, label in self.menu_items():
+                if cmd:
+                    api.AppendMenuW(menu, MF_STRING, cmd, label)
+                else:
+                    api.AppendMenuW(menu, MF_SEPARATOR, 0, None)
             pt = api.POINT()
             api.GetCursorPos(ctypes.byref(pt))
             api.SetForegroundWindow(self._hwnd)               # otherwise the menu won't close properly
@@ -359,7 +371,9 @@ class Tray:
         self.handle_command(cmd)
 
     def handle_command(self, cmd: int) -> None:
-        if cmd == self.CMD_PAUSE and self._on_toggle_pause is not None:
+        if cmd == self.CMD_OPEN and self._on_open is not None:
+            self._on_open()
+        elif cmd == self.CMD_PAUSE and self._on_toggle_pause is not None:
             self._on_toggle_pause()
         elif cmd == self.CMD_QUIT:
             if self._on_quit is not None:

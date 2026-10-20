@@ -5,3 +5,4 @@ httpx
 onnxruntime
 numpy
 sounddevice
+pywebview
