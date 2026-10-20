@@ -8,3 +8,4 @@ logs/
 jarvis_workspace/
 frontend/node_modules/
 claude/
+.claude/
