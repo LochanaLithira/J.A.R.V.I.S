@@ -37,6 +37,11 @@ GEMINI_MODELS = ("gemini-3.5-flash-lite", "gemini-3.1-flash-lite")
 GEMINI_TIMEOUT_SECONDS = 15.0
 
 
+# How J.A.R.V.I.S addresses you when it speaks ("sir", "ma'am", or a name such as "Mr Lithira").
+USER_ADDRESS = "sir"
+# Say a short greeting ("Good morning, sir. All systems are online.") when it starts.
+GREETING_ON_START = True
+
 # Fish Audio voice. Leave empty for the default voice, or paste a voice ID (32 lowercase hex
 # characters) from fish.audio: open a voice and copy its model ID.
 FISH_VOICE_ID = "05b36da8574341d0803391491850db20"
