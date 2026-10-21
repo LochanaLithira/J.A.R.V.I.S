@@ -22,9 +22,11 @@ from .tools.timers import TimerService
 from .ui.confirm import popup_confirm
 from .voice.listen import Heard
 from .voice.speak import Voice
+from .voice.style import Style
 from .voice.triggers import Microphone, TriggerError, pick_microphone, play_chime
 
 MAX_LINE = 10_000
+_STYLE = Style(config.USER_ADDRESS)          # how spoken replies are phrased (the printout stays literal)
 
 HELP = """Commands:
   tools                      list the tools and their risk level
@@ -102,7 +104,7 @@ def _say(get_flow: Callable[[], Flow] | None, sentence: str, voice: Voice | None
     except (BrainError, CredentialError, FlowError) as exc:
         return f"NO: {exc}"
     if voice is not None:
-        voice.say(result)
+        voice.say(Result(result.ok, _STYLE.line(result)))   # private results stay a fixed line
     return ("OK: " if result.ok else "NO: ") + result.message
 
 
@@ -234,7 +236,7 @@ def _console_timer_done(voice: Voice | None) -> Callable[[str], None]:
     def done(label: str) -> None:
         print(f"\nTIMER: {'Timer done: ' + label if label else 'Your timer is done.'}")
         if voice is not None:
-            voice.say(Result(True, TIMER_DONE_LINE))
+            voice.say(Result(True, _STYLE.timer_line(bool(label))))
 
     return done
 

@@ -455,6 +455,62 @@ def test_stop_phrases(text, stop):
     assert main.is_stop_phrase(text) is stop
 
 
+# ---- JARVIS speaking style ------------------------------------------------------------------
+
+def first_choice(options):
+    return options[0]
+
+
+def test_spoken_and_shown_replies_use_the_jarvis_style(run_assistant):
+    from backend.voice.style import Style
+
+    events = []
+    flow = FakeFlow()
+    a, trig, *_ = run_assistant(flow=flow, style=Style(choose=first_choice),
+                                on_event=lambda k, d: events.append((k, d)))
+    trig.fire.set()
+    assert wait_for(lambda: a._voice.said)
+    assert a._voice.said == [("Opening Notepad, sir.", True, True)]
+    reply = next(d for k, d in events if k == "reply")
+    assert reply["text"] == "Opening Notepad, sir." and reply["private"] is False
+
+
+def test_private_replies_are_spoken_as_a_fixed_line_and_shown_in_full(run_assistant):
+    from backend.voice.style import Style
+
+    events = []
+    flow = FakeFlow(Result(True, "dear diary", private=True))
+    a, trig, mics, statuses, notices, shown, chimes = run_assistant(
+        flow=flow, style=Style(choose=first_choice), on_event=lambda k, d: events.append((k, d)))
+    trig.fire.set()
+    assert wait_for(lambda: shown == ["dear diary"])
+    assert a._voice.said == [("It's on your screen, sir.", True, True)]
+    reply = next(d for k, d in events if k == "reply")
+    assert reply["text"] == "dear diary" and reply["private"] is True       # on the local screen only
+
+
+def test_the_greeting_is_spoken_muted_and_shown(run_assistant):
+    events = []
+    a, trig, mics, *_ = run_assistant(on_event=lambda k, d: events.append((k, d)))
+    a.say_line("Good morning, sir. All systems are online.")
+    assert wait_for(lambda: a._voice.said)
+    assert a._voice.said == [("Good morning, sir. All systems are online.", True, True)]
+    assert ("said", {"text": "Good morning, sir. All systems are online."}) in events
+    a.say_line("   ")
+    time.sleep(0.1)
+    assert len(a._voice.said) == 1                           # nothing to say: nothing spoken
+
+
+def test_timer_lines_use_the_style_too(run_assistant):
+    from backend.voice.style import Style
+
+    a, trig, mics, statuses, notices, shown, chimes = run_assistant(alarm=lambda: None, style=Style(choose=first_choice))
+    a.announce("tea")
+    assert wait_for(lambda: a._voice.said)
+    assert a._voice.said == [("Sir, a reminder for you. It's on your screen.", True, True)]
+    assert shown == ["Timer done: tea"]
+
+
 # ---- finished timers ------------------------------------------------------------------------
 
 def test_a_reminder_rings_speaks_a_fixed_line_and_shows_its_label(run_assistant):
@@ -521,7 +577,7 @@ def test_console_timer_message(capsys):
     cli._console_timer_done(None)("")
     out = capsys.readouterr().out
     assert "TIMER: Timer done: tea" in out and "TIMER: Your timer is done." in out
-    assert said == [main.TIMER_DONE_LINE]
+    assert len(said) == 1 and "reminder" in said[0].lower() and "tea" not in said[0]   # label never spoken
 
 
 def test_connections_are_warmed_on_wake_and_timing_is_logged(run_assistant):

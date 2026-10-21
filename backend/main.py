@@ -40,6 +40,7 @@ from .tools.timers import TimerService
 from .voice.listen import CommandRecorder, GroqTranscriber, Heard, SileroVAD, SpeechInput
 from .voice.keepalive import warm_all
 from .voice.speak import FishSpeaker, Voice
+from .voice.style import Style
 from .voice.triggers import (ALARM_CHIME, ClapDetector, Microphone, TriggerError, Triggers, WakeEvent,
                              WakeWordDetector, pick_microphone, play_chime, play_close_chime, play_done_chime)
 
@@ -74,7 +75,8 @@ def make_brain_getter() -> Callable[[], Brain]:
             key = get_secret("gemini_api_key")
             if not key:
                 raise BrainError("No Gemini key is stored. Run: python -m backend.credentials set gemini_api_key")
-            cache.append(GeminiBrain(key, config.GEMINI_MODELS, config.GEMINI_TIMEOUT_SECONDS))
+            cache.append(GeminiBrain(key, config.GEMINI_MODELS, config.GEMINI_TIMEOUT_SECONDS,
+                                     address=config.USER_ADDRESS))
         return cache[0]
 
     return get
@@ -195,6 +197,7 @@ class Assistant:
                  alarm: Callable[[], None] | None = None,
                  on_event: Callable[[str, dict], None] | None = None,
                  on_level: Callable[[float], None] | None = None,
+                 style: Style | None = None,
                  retry_seconds: float = RETRY_SECONDS, mic_idle_seconds: float = MIC_IDLE_SECONDS):
         self._triggers, self._speech, self._get_flow, self._voice = triggers, speech, get_flow, voice
         self._warm = warm                     # reconnect to the cloud services while you speak
@@ -204,6 +207,7 @@ class Assistant:
         self._alarm = alarm or _play_alarm_and_wait
         self._announcements: queue.Queue[str] = queue.Queue()   # finished timers, from the timer thread
         self._on_event, self._on_level = on_event, on_level    # feed the on-demand screen
+        self._style = style                    # how J.A.R.V.I.S phrases what it says
         self._device, self._mic_factory, self._chime = device, mic_factory, chime
         self._show_text, self._on_status, self._on_notice, self._out = show_text, on_status, on_notice, out
         self._retry, self._mic_idle = retry_seconds, mic_idle_seconds
@@ -242,24 +246,41 @@ class Assistant:
 
     def announce(self, label: str) -> None:
         """A timer finished (called from the timer thread). Handled by the loop within ~0.1 s."""
-        self._announcements.put(label if isinstance(label, str) else "")
+        self._announcements.put(("timer", label if isinstance(label, str) else ""))
+
+    def say_line(self, text: str) -> None:
+        """Speak a fixed line of our own (the startup greeting), safely from any thread: the loop
+        mutes the wake-up while it speaks and drops what the microphone heard meanwhile."""
+        if isinstance(text, str) and text.strip():
+            self._announcements.put(("say", text.strip()))
+
+    def _speak_line(self, text: str) -> bool:
+        if self._voice is None:
+            return False
+        self._triggers.set_muted(True)
+        try:
+            return self._voice.say(Result(True, text), wait=True)
+        finally:
+            self._triggers.set_muted(False)
 
     def _announce_pending(self, mic: Any = None) -> None:
         while True:
             try:
-                label = self._announcements.get_nowait()
+                kind, label = self._announcements.get_nowait()
             except queue.Empty:
                 return
+            if kind == "say":
+                self._emit("said", text=label)
+                self._say_out(f"J.A.R.V.I.S: {label}")
+                self._speak_line(label)
+                if mic is not None:
+                    mic.drain()
+                continue
             log.info("timer finished")                     # the label is your words: never logged
             self._emit("timer", label=label)
             self._alarm()
-            spoken = False
-            if self._voice is not None:
-                self._triggers.set_muted(True)
-                try:
-                    spoken = self._voice.say(Result(True, TIMER_DONE_LINE), wait=True)
-                finally:
-                    self._triggers.set_muted(False)
+            line = self._style.timer_line(bool(label)) if self._style is not None else TIMER_DONE_LINE
+            spoken = self._speak_line(line)
             text = f"Timer done: {label}" if label else "Your timer is done."
             self._say_out(f"TIMER: {text}")
             if self._show_text is not None and (label or not spoken):
@@ -484,14 +505,18 @@ class Assistant:
             return time.monotonic() - t0, 0.0, None
         t1 = time.monotonic()
         self._say_out(("OK: " if result.ok else "NO: ") + result.message)
-        self._emit("reply", text=result.message, ok=bool(result.ok),
-                   private=getattr(result, "private", True) is not False)
+        private = getattr(result, "private", True) is not False
+        # How J.A.R.V.I.S says it. Built from spoken_text(), so a private result only ever becomes
+        # a fixed "it's on your screen" line; the real content stays on screen.
+        to_speak = Result(result.ok, self._style.line(result)) if self._style is not None else result
+        shown = result.message if private or self._style is None else to_speak.message
+        self._emit("reply", text=shown, ok=bool(result.ok), private=private)
         spoken = False
         if self._voice is not None:
             self._triggers.set_muted(True)       # J.A.R.V.I.S's own voice must never wake it
             self._emit("speaking")
             try:
-                spoken = self._voice.say(result, wait=True)
+                spoken = self._voice.say(to_speak, wait=True)
             finally:
                 self._triggers.set_muted(False)
                 self._emit("spoke")
@@ -505,7 +530,8 @@ def build_assistant(audit: Any, get_flow: Callable[[], Flow] | None, voice: Voic
                     on_status: Callable[[Status, str], None] | None = None,
                     on_notice: Callable[[str], None] | None = None,
                     on_event: Callable[[str, dict], None] | None = None,
-                    on_level: Callable[[float], None] | None = None) -> Assistant:
+                    on_level: Callable[[float], None] | None = None,
+                    style: Style | None = None) -> Assistant:
     """Everything the loop needs, from config.py. Raises TriggerError if the models or the
     microphone named in config.py are missing."""
     wake = WakeWordDetector(config.MODELS_DIR)
@@ -520,7 +546,7 @@ def build_assistant(audit: Any, get_flow: Callable[[], Flow] | None, voice: Voic
                      on_notice=on_notice, out=out, warm=warm_all,
                      follow_up_on_question=config.FOLLOW_UP_ON_QUESTION, follow_up_always=config.FOLLOW_UP_ALWAYS,
                      follow_up_seconds=config.FOLLOW_UP_SECONDS, follow_up_max_turns=config.FOLLOW_UP_MAX_TURNS,
-                     on_event=on_event, on_level=on_level)
+                     on_event=on_event, on_level=on_level, style=style or Style(config.USER_ADDRESS))
 
 
 # ---------------------------------------------------------------------------
@@ -581,6 +607,8 @@ def screen_feed(screen: Any) -> tuple[Callable[[Status, str], None], Callable[[s
             screen.refresh_timers()
         elif kind == "speaking":
             screen.set_state("speaking")
+        elif kind == "said":
+            screen.add_message("jarvis", data.get("text", ""))
         elif kind == "timer":
             label = data.get("label", "")
             screen.add_message("system", f"Timer done: {label}" if label else "Your timer is done.")
@@ -739,6 +767,8 @@ def main() -> int:
         tray.notify("J.A.R.V.I.S needs setting up", "\n".join(problems))
     if "a" in holder:
         holder["a"].start()
+        if config.GREETING_ON_START:
+            holder["a"].say_line(Style(config.USER_ADDRESS).greeting())
     try:
         tray.run()                       # the Windows message loop; returns when you choose Quit
     finally:
