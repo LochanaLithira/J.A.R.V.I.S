@@ -64,6 +64,8 @@ _PRIVATE = ("It's on your screen, {a}.", "I've put it on your screen, {a}.", "Do
 _TIMER = ("{A}, your timer has finished.", "Pardon the interruption, {a}. Your timer is up.", "Time's up, {a}.")
 _REMINDER = ("{A}, a reminder for you. It's on your screen.", "Pardon the interruption, {a}. Your reminder is on your screen.")
 _GREETING_END = ("All systems are online.", "At your service.", "Systems online and ready.")
+_FAREWELL = ("Very good, {a}.", "As you wish, {a}. I'll be here if you need me.", "Of course, {a}.",
+             "Very well, {a}. Just say the word.")
 
 
 class Style:
@@ -114,6 +116,10 @@ class Style:
     def timer_line(self, has_label: bool) -> str:
         """The label is the user's own words, so it is never part of the spoken line."""
         return self._fill(self._pick(_REMINDER if has_label else _TIMER))
+
+    def farewell(self) -> str:
+        """Said when you end a conversation ("that's all", "goodbye")."""
+        return self._fill(self._pick(_FAREWELL))
 
     def greeting(self, now: datetime | None = None) -> str:
         hour = (now or datetime.now()).hour

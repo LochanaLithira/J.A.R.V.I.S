@@ -123,7 +123,7 @@ No console window opens. A round icon appears next to the clock:
 - **Left-click** the icon to open the J.A.R.V.I.S. screen.
 - **Right-click** for Open J.A.R.V.I.S., Pause / Resume listening, and Quit.
 
-Say `hey jarvis`, wait for the chime, then speak your command. A falling tone means it heard you. If J.A.R.V.I.S. asks you a question, just answer after the chime; say "stop" or "cancel" to end. Only one copy can run at a time. Errors are written to `%LOCALAPPDATA%\jarvis\jarvis.log` (never your words).
+Say `hey jarvis`, wait for the chime, then speak your command. A falling tone means it heard you. After it replies, it chimes and keeps listening, so you can carry on talking without the wake word: it remembers the last few things you said in this conversation. Say "that's all", "goodbye" or "thanks, Jarvis" to finish, or simply stay quiet for 8 seconds. Only one copy can run at a time. Errors are written to `%LOCALAPPDATA%\jarvis\jarvis.log` (never your words).
 
 ## Start with Windows
 
@@ -202,7 +202,10 @@ Most local settings are in `backend/config.py`, including:
 - Microphone selection and wake-word sensitivity.
 - Speech recording limits.
 - Double-clap detection settings.
-- Follow-ups: `FOLLOW_UP_ON_QUESTION`, `FOLLOW_UP_ALWAYS` (off by default), `FOLLOW_UP_SECONDS`, `FOLLOW_UP_MAX_TURNS`.
+- How it speaks: `USER_ADDRESS` ("sir" by default) and `GREETING_ON_START`.
+- When you have finished speaking: `LISTEN_END_SILENCE_SECONDS` (1.2 s) and `LISTEN_UNFINISHED_EXTRA_SECONDS`.
+- Conversation mode: `CONVERSATION_MODE` (on), `CONVERSATION_SECONDS`, `CONVERSATION_MAX_TURNS`, `CONVERSATION_MAX_SECONDS`, `CONVERSATION_MEMORY_TURNS`.
+- Follow-ups when conversation mode is off: `FOLLOW_UP_ON_QUESTION`, `FOLLOW_UP_SECONDS`, `FOLLOW_UP_MAX_TURNS`.
 
 Only applications explicitly added to `ALLOWED_APPS` can be opened by the application tools. Use full executable paths and review changes carefully.
 

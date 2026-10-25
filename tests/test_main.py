@@ -393,15 +393,118 @@ def test_follow_ups_stop_after_the_turn_limit(run_assistant):
     assert len(flow.seen) == 1 + 3 and chimes == [1, 1, 1, 1, "close"]
 
 
-def test_alexa_style_window_after_every_reply(run_assistant):
-    flow = FakeFlow(DONE)
+# ---- conversation mode ------------------------------------------------------------------------
+
+NOTEPAD = Result(True, "Opening notepad.", action={"tool": "open_app", "args": {"name": "notepad"}})
+CALC = Result(True, "Opening calculator.", action={"tool": "open_app", "args": {"name": "calculator"}})
+
+
+def said(*texts):
+    return tuple(Heard(text=t, reason="done") for t in texts)
+
+
+def test_a_conversation_carries_on_without_the_wake_word_and_remembers(run_assistant):
+    from backend.brain import Turn
+
+    flow = FakeFlow(NOTEPAD, CALC)
     a, trig, mics, statuses, notices, shown, chimes = run_assistant(
-        flow=flow, heard=(Heard(text="open notepad", reason="done"), Heard(text="open calculator", reason="done"),
-                          Heard(reason="no speech")), follow_up_always=True)
+        flow=flow, heard=said("open notepad", "and the calculator") + (Heard(reason="no speech"),), conversation=True)
     trig.fire.set()
     assert wait_for(lambda: chimes and chimes[-1] == "close")
-    assert flow.seen == ["open notepad", "open calculator"]
-    assert flow.histories == [(), ()]               # not a question, so no earlier turn is sent
+    assert flow.seen == ["open notepad", "and the calculator"]
+    assert flow.histories == [(), (Turn("open notepad", action=NOTEPAD.action),)]   # its own proposal, remembered
+    assert a._speech.waits == [None, 8.0, 8.0]                 # 8 s to start each new turn
+    assert chimes == [1, 1, 1, "close"]
+
+
+def test_tool_output_is_never_remembered(run_assistant):
+    flow = FakeFlow(Result(True, "dear diary, my secrets"), DONE)     # no proposal recorded, not the AI's words
+    a, trig, mics, statuses, notices, shown, chimes = run_assistant(
+        flow=flow, heard=said("read my note", "thanks again") + (Heard(reason="no speech"),), conversation=True)
+    trig.fire.set()
+    assert wait_for(lambda: chimes and chimes[-1] == "close")
+    assert flow.histories == [(), ()]
+
+
+def test_the_ai_s_own_replies_are_remembered(run_assistant):
+    from backend.brain import Turn
+
+    hello = Result(True, "Good day, sir.", ai_reply=True)
+    flow = FakeFlow(hello, DONE)
+    a, trig, mics, statuses, notices, shown, chimes = run_assistant(
+        flow=flow, heard=said("hello jarvis", "open notepad") + (Heard(reason="no speech"),), conversation=True)
+    trig.fire.set()
+    assert wait_for(lambda: chimes and chimes[-1] == "close")
+    assert flow.histories[1] == (Turn("hello jarvis", reply="Good day, sir."),)
+
+
+@pytest.mark.parametrize("goodbye", ["That's all.", "Goodbye, Jarvis.", "Thanks, Jarvis.", "okay thanks", "stop"])
+def test_saying_goodbye_ends_politely(run_assistant, goodbye):
+    from backend.voice.style import Style
+
+    flow = FakeFlow(NOTEPAD)
+    a, trig, mics, statuses, notices, shown, chimes = run_assistant(
+        flow=flow, heard=said("open notepad", goodbye), conversation=True, style=Style(choose=first_choice))
+    trig.fire.set()
+    assert wait_for(lambda: chimes and chimes[-1] == "close")
+    assert flow.seen == ["open notepad"]                        # the goodbye is never sent to the AI
+    assert a._voice.said[-1] == ("Very good, sir.", True, True)
+
+
+def test_never_mind_straight_after_the_wake_word(run_assistant):
+    from backend.voice.style import Style
+
+    flow = FakeFlow()
+    a, trig, mics, statuses, notices, shown, chimes = run_assistant(
+        flow=flow, heard=said("never mind"), conversation=True, style=Style(choose=first_choice))
+    trig.fire.set()
+    assert wait_for(lambda: chimes and chimes[-1] == "close")
+    assert flow.seen == [] and a._voice.said == [("Very good, sir.", True, True)]
+
+
+def test_conversation_ends_at_the_turn_limit(run_assistant):
+    flow = FakeFlow(NOTEPAD)
+    a, trig, mics, statuses, notices, shown, chimes = run_assistant(
+        flow=flow, heard=Heard(text="open notepad", reason="done"), conversation=True, conversation_max_turns=2)
+    trig.fire.set()
+    assert wait_for(lambda: chimes and chimes[-1] == "close")
+    assert len(flow.seen) == 1 + 2
+
+
+def test_conversation_ends_at_the_time_limit(run_assistant):
+    flow = FakeFlow(NOTEPAD)
+    a, trig, mics, statuses, notices, shown, chimes = run_assistant(
+        flow=flow, heard=Heard(text="open notepad", reason="done"), conversation=True, conversation_max_seconds=0.0)
+    trig.fire.set()
+    assert wait_for(lambda: chimes and chimes[-1] == "close")
+    assert flow.seen == ["open notepad"]
+
+
+def test_memory_holds_only_the_latest_turns(run_assistant):
+    flow = FakeFlow(NOTEPAD)
+    a, trig, mics, statuses, notices, shown, chimes = run_assistant(
+        flow=flow, heard=said("one", "two", "three", "four") + (Heard(reason="no speech"),),
+        conversation=True, memory_turns=2)
+    trig.fire.set()
+    assert wait_for(lambda: chimes and chimes[-1] == "close")
+    assert [len(h) for h in flow.histories] == [0, 1, 2, 2]
+    assert [t.user for t in flow.histories[-1]] == ["two", "three"]
+
+
+def test_screen_shows_in_conversation():
+    from backend.main import screen_feed
+
+    seen = []
+
+    class S:
+        def set_state(self, *a):
+            seen.append(a)
+
+    _, on_event = screen_feed(S())
+    on_event("hearing", {"follow_up": True, "conversation": True})
+    on_event("hearing", {"follow_up": True, "conversation": False})
+    on_event("hearing", {"follow_up": False})
+    assert seen == [("hearing", "in conversation"), ("hearing", "your answer"), ("hearing", "go ahead")]
 
 
 def test_follow_up_on_question_can_be_turned_off(run_assistant):
@@ -622,13 +725,30 @@ def test_build_assistant_from_config(monkeypatch, audit):
     monkeypatch.setattr(main, "ClapDetector", lambda level, on_clap=None: ("clap", on_clap))
     monkeypatch.setattr(main, "pick_microphone", lambda name: 7)
     monkeypatch.setattr(main, "make_speech", lambda audit, on_recorded=None: ("speech", on_recorded))
+    monkeypatch.setattr(main, "SileroVAD", lambda d: "vad")
+    monkeypatch.setattr(main, "VoiceCheck", lambda vad, seconds, prob: ("voice check", vad, seconds))
+    monkeypatch.setattr(config, "CLAP_ENABLED", True)
     a = main.build_assistant(audit, None, None)
     assert a._device == 7 and a._triggers._clap == ("clap", None)
+    assert a._triggers._voice_check == ("voice check", "vad", config.WAKE_MIN_SPEECH_SECONDS)
     assert a._speech == ("speech", main.play_done_chime) and a._warm is main.warm_all
     lines = []
     b = main.build_assistant(audit, None, None, out=lines.append)
     b._triggers._clap[1](1234)
     assert lines == ["  (clap heard, level 1234)"]
+    monkeypatch.setattr(config, "CLAP_ENABLED", False)
+    monkeypatch.setattr(config, "WAKE_SPEECH_CHECK", False)
+    c = main.build_assistant(audit, None, None)
+    assert c._triggers._clap is None and c._triggers._voice_check is None
+
+
+def test_false_trigger_defaults():
+    assert config.CLAP_ENABLED is False                         # knocks and taps looked like claps
+    assert config.WAKE_SPEECH_CHECK is True
+    assert 0.2 <= config.WAKE_MIN_SPEECH_SECONDS <= 0.8
+    assert 0.5 <= config.WAKE_SPEECH_CONFIDENCE <= 0.9
+    assert 0.5 <= config.LISTEN_START_CONFIDENCE <= 0.9
+    assert 0.3 <= config.LISTEN_MIN_SPEECH_SECONDS <= 1.0
 
 
 # ---- startup ----------------------------------------------------------------------------

@@ -152,7 +152,8 @@ def test_upload_goes_to_groq_with_the_right_fields():
     url, headers, data, audio, timeout = t.calls[0]
     assert url == API_URL == "https://api.groq.com/openai/v1/audio/transcriptions"
     assert headers == {"Authorization": f"Bearer {KEY}"}
-    assert data == {"model": "whisper-large-v3-turbo", "language": "en", "response_format": "json", "temperature": "0"}
+    assert data == {"model": "whisper-large-v3-turbo", "language": "en", "response_format": "verbose_json",
+                    "temperature": "0"}
     assert audio[:4] == b"RIFF" and timeout == ls.REQUEST_TIMEOUT_SECONDS
 
 
@@ -279,6 +280,129 @@ def test_upload_failure_is_reported(audit):
         slices(np.concatenate([tone(1.0), quiet(1.5)])))
     assert heard.text == "" and "free limit" in heard.error
     assert '"ok":false' in audit.path.read_text()
+
+
+# ---- background sound is never sent ---------------------------------------------------------
+
+def test_a_short_bang_does_not_start_a_command():
+    bang = tone(0.05)                                         # under two frames of loud sound
+    rec, _ = record(np.concatenate([quiet(0.512), bang, quiet(6.0)]), start_frames=3, start_prob=0.6)
+    assert rec.audio is None and rec.reason == "no speech"
+
+
+def test_too_little_speech_is_never_sent():
+    rec, _ = record(np.concatenate([quiet(0.5), tone(0.3), quiet(2.0)]), min_speech=0.4)
+    assert rec.audio is None and rec.reason == "too short"
+
+
+def test_real_commands_still_get_through():
+    rec, _ = record(np.concatenate([quiet(0.5), tone(0.8), quiet(2.0)]), min_speech=0.4, start_frames=3,
+                    start_prob=0.6)
+    assert rec.reason == "done" and rec.audio is not None
+
+
+@pytest.mark.parametrize("segments, text", [
+    ([{"text": " Open notepad.", "avg_logprob": -0.4, "compression_ratio": 0.7, "no_speech_prob": 0}],
+     "Open notepad."),
+    ([{"text": " Thank you.", "avg_logprob": -1.3, "compression_ratio": 0.6, "no_speech_prob": 0}], ""),
+    ([{"text": " so so so so so so so so", "avg_logprob": -0.3, "compression_ratio": 3.1, "no_speech_prob": 0}], ""),
+    ([{"text": " Hello.", "avg_logprob": -0.8, "compression_ratio": 0.6, "no_speech_prob": 0.95}], ""),
+    ([{"text": " Open", "avg_logprob": -0.3, "compression_ratio": 0.6},
+      {"text": " music music music", "avg_logprob": -1.4, "compression_ratio": 2.6}], "Open"),
+])
+def test_guessed_words_are_dropped(segments, text):
+    assert ls.trusted_text({"text": "ignored", "segments": segments}) == text
+
+
+def test_plain_answers_without_details_still_work():
+    assert ls.trusted_text({"text": " Open notepad."}) == " Open notepad."
+    assert ls.trusted_text({"segments": "odd"}) == ""
+
+
+def test_noise_only_is_reported_and_nothing_runs(audit):
+    class Groq:
+        def transcribe(self, audio):
+            return ""                                         # every part was a guess
+
+    heard = SpeechInput(CommandRecorder(LoudVAD()), Groq(), audit).hear(
+        slices(np.concatenate([quiet(0.5), tone(1.0), quiet(1.5)])))
+    assert heard == Heard(reason="noise")
+
+
+def test_noise_message_in_the_console():
+    from backend.main import describe_heard
+
+    assert "background noise" in describe_heard(Heard(reason="noise"))
+
+
+# ---- a sentence that stops mid-way ------------------------------------------------------------
+
+@pytest.mark.parametrize("text, unfinished", [
+    ("Open the.", True), ("Make a note called", True), ("Open notepad and...", True), ("Um.", True),
+    ("Remind me to", True), ("Open my,", True),
+    ("Open notepad.", False), ("Open notepad please.", False), ("What time is it?", False), ("", False),
+    ("Thanks!", False),
+])
+def test_sounds_unfinished(text, unfinished):
+    assert ls.sounds_unfinished(text) is unfinished
+
+
+class Scripted:
+    """A transcriber that returns one text per upload."""
+
+    def __init__(self, *texts):
+        self.texts, self.calls = list(texts), 0
+
+    def transcribe(self, audio):
+        self.calls += 1
+        return self.texts.pop(0)
+
+
+def two_parts(gap=1.5):
+    return np.concatenate([quiet(0.5), tone(1.0), quiet(gap), tone(1.0), quiet(3.0)])
+
+
+def test_an_unfinished_sentence_keeps_listening_and_joins_the_parts(audit):
+    order = []
+    groq = Scripted("Make a note called.", "shopping list")
+    speech = SpeechInput(CommandRecorder(LoudVAD(), end_silence=1.2), groq, audit,
+                         on_recorded=lambda: order.append("tone"), unfinished_extra_seconds=2.0)
+    heard = speech.hear(slices(two_parts()))
+    assert heard.text == "Make a note called shopping list" and groq.calls == 2
+    assert order == ["tone"]                                  # one "got it", at the very end
+    assert audit.path.read_text().count('"event":"speech_sent"') == 2
+
+
+def test_a_finished_sentence_is_not_extended(audit):
+    groq = Scripted("Open notepad.")
+    speech = SpeechInput(CommandRecorder(LoudVAD(), end_silence=1.2), groq, audit, unfinished_extra_seconds=2.0)
+    assert speech.hear(slices(two_parts())).text == "Open notepad." and groq.calls == 1
+
+
+def test_nothing_more_said_keeps_the_first_part(audit):
+    groq = Scripted("Open the.")
+    speech = SpeechInput(CommandRecorder(LoudVAD(), end_silence=1.2), groq, audit, unfinished_extra_seconds=2.0)
+    heard = speech.hear(slices(np.concatenate([quiet(0.5), tone(1.0), quiet(5.0)])))
+    assert heard.text == "Open the." and groq.calls == 1
+
+
+def test_the_check_can_be_turned_off(audit):
+    order = []
+
+    class Groq:
+        def transcribe(self, audio):
+            order.append("upload")
+            return "Open the."
+
+    speech = SpeechInput(CommandRecorder(LoudVAD(), end_silence=1.2), Groq(), audit,
+                         on_recorded=lambda: order.append("tone"), unfinished_extra_seconds=0)
+    assert speech.hear(slices(two_parts())).text == "Open the."
+    assert order == ["tone", "upload"]                        # without the check the tone comes first
+
+
+def test_a_longer_pause_no_longer_cuts_you_off():
+    rec, _ = record(two_parts(gap=1.0), end_silence=1.2)       # a one-second pause to think
+    assert rec.reason == "done" and len(rec.audio) / SR > 2.9  # both halves in one recording
 
 
 # ---- console --------------------------------------------------------------------------

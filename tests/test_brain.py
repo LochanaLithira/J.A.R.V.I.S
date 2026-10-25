@@ -185,13 +185,30 @@ def test_answer_to_a_question_is_sent_with_that_question():
 def test_history_is_limited_and_cleaned():
     from backend.brain import MAX_REPLY_TEXT_CHARS, Turn, build_contents
 
-    turns = (Turn("first", "Old question?"), Turn("second\x07", "New\nquestion?" + "x" * 900))
+    turns = tuple(Turn(f"turn {i}", f"Reply {i}.") for i in range(8)) + (Turn("last\x07", "Long\n?" + "x" * 900),)
     contents = build_contents("answer", turns)
-    assert len(contents) == 3                                          # only the latest exchange
-    assert contents[0]["parts"][0]["text"] == "second"
-    assert len(contents[1]["parts"][0]["text"]) < MAX_REPLY_TEXT_CHARS + 40
+    assert len(contents) == 6 * 2 + 1                                  # only the latest six exchanges
+    assert contents[0]["parts"][0]["text"] == "turn 3"
+    assert contents[-3]["parts"][0]["text"] == "last"                  # cleaned like any command
+    assert len(contents[-2]["parts"][0]["text"]) < MAX_REPLY_TEXT_CHARS + 40
     assert build_contents("answer") == "answer"                         # no history: exactly as before
-    assert build_contents("answer", (Turn("x", ""),)) == "answer"       # an empty question adds nothing
+    assert build_contents("answer", (Turn("x", ""),)) == "answer"       # an empty turn adds nothing
+
+
+def test_remembered_actions_are_the_ai_s_own_proposals():
+    from backend.brain import Turn, build_contents
+
+    contents = build_contents("and the calculator",
+                              (Turn("open notepad", action={"tool": "open_app", "args": {"name": "notepad"}}),))
+    assert contents[1] == {"role": "model", "parts": [{"text": '{"tool": "open_app", "args": {"name": "notepad"}}'}]}
+
+
+@pytest.mark.parametrize("action", [{"tool": "Bad Tool!", "args": {}}, {"tool": "open_app", "args": "x"},
+                                    {"args": {}}, {"tool": "open_app", "args": {"text": "x" * 2000}}])
+def test_odd_remembered_actions_are_skipped(action):
+    from backend.brain import Turn, build_contents
+
+    assert build_contents("hi", (Turn("earlier", action=action),)) == "hi"
 
 
 def test_rules_ask_for_one_short_question_when_a_detail_is_missing():
@@ -204,6 +221,26 @@ def test_rules_ask_for_one_short_question_when_a_detail_is_missing():
 def test_gemini_reply_only():
     reply = brain_with(FakeClient('{"tool": null, "reply": "Which app?"}')).propose("do it", SPECS)
     assert reply.proposal is None and reply.text == "Which app?"
+
+
+@pytest.mark.parametrize("raw", [
+    '{"tool": "set_timer", "args": {"seconds": 600, "label": ""}}\n``',     # seen from Gemini
+    '``{"tool": "set_timer", "args": {"seconds": 600, "label": ""}}',
+    'json {"tool": "set_timer", "args": {"seconds": 600, "label": ""}}',
+    '```json\n{"tool": "set_timer", "args": {"seconds": 600, "label": ""}}\n```',
+])
+def test_stray_code_fences_are_tolerated(raw):
+    from backend.brain import parse_reply
+
+    assert parse_reply(raw).proposal == Proposal("set_timer", {"seconds": 600, "label": ""})
+
+
+@pytest.mark.parametrize("raw", ['{"tool": "a"} extra', '`{"tool": "a"}` and more', '``', 'json'])
+def test_anything_else_around_the_json_is_still_refused(raw):
+    from backend.brain import parse_reply
+
+    with pytest.raises(BrainError):
+        parse_reply(raw)
 
 
 @pytest.mark.parametrize("text", [None, "", "   ", "not json", '{"tool": 5}'])

@@ -28,7 +28,7 @@ Tool results are **never sent back to the AI**. This blocks the most dangerous k
 
 | Service | What is sent | When | Notes |
 | --- | --- | --- | --- |
-| Google Gemini (free tier) | Your command text, the list of tool descriptions, and for a follow-up answer, your previous sentence and J.A.R.V.I.S.'s question | For each command | On the free tier Google may review requests to improve its products. Do not say private things to J.A.R.V.I.S. |
+| Google Gemini (free tier) | Your command text, the list of tool descriptions, and during a conversation up to six earlier exchanges: your sentences plus the AI's own replies or proposed actions (never what a tool returned) | For each command | On the free tier Google may review requests to improve its products. Do not say private things to J.A.R.V.I.S. The conversation memory is cleared when the conversation ends. |
 | Groq Whisper (free tier) | The audio of your spoken command only, with silence trimmed | Only after the wake word, double clap, or the console's `hear` | Groq does not keep inputs by default. Turn on **Zero Data Retention** in the Groq console to be sure. |
 | Fish Audio (free model) | The text of J.A.R.V.I.S.'s spoken reply | For each spoken reply | Private results (note text, file names, reminder labels) are **never** sent; a fixed line is spoken instead. Fish may keep free-tier requests. |
 | GitHub (openWakeWord release) | A normal download request | Once, when you run the model download | Every model file is checked against a fixed SHA-256 fingerprint before it is saved or loaded. |
@@ -63,7 +63,8 @@ Nothing else is sent anywhere. In particular:
 - Waking up grants no permission. It only starts listening, and every action still goes through the gate.
 - The microphone is **closed** while J.A.R.V.I.S. is paused, while Windows is locked, and while the laptop sleeps, so nobody can command your laptop while you are away.
 - J.A.R.V.I.S. can never wake itself or answer itself: the wake-up is muted while it speaks, and audio captured meanwhile is thrown away.
-- Commands are capped at 15 seconds, and follow-up answers end after three turns, on silence, or on "stop".
+- Each spoken command is capped at 15 seconds (a sentence that stops mid-way may get 2 seconds more).
+- A conversation (one `hey jarvis`, then talking freely) ends when you say goodbye or "that's all", after 8 seconds of silence, after 10 commands or 3 minutes, or when Windows is locked. While it is open, anything said near the laptop may be sent to Groq; silence never is, and risky actions still need the keypress.
 
 **Program**
 - One copy only, enforced with a Windows lock (two copies would break the audit chain).
@@ -131,6 +132,6 @@ Every new tool must pass this checklist:
 - Turn on **Zero Data Retention** in the Groq console (Settings, then Data Controls).
 - Remove folders you never want touched from `FILE_FOLDERS` in `backend/config.py`.
 - Lock Windows (Windows key + L) when you step away; J.A.R.V.I.S. stops listening at once.
-- Keep `FOLLOW_UP_ALWAYS = False` unless you want the open listening window after every reply.
+- Set `CONVERSATION_MODE = False` if you prefer to say `hey jarvis` before every command, so the microphone is never left open between commands.
 - Run `verify` in the console now and then to check the audit chain.
 - Turn autostart off with `scripts\install_autostart.ps1 -Remove` if you only want J.A.R.V.I.S. on demand.

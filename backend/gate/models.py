@@ -1,7 +1,7 @@
 """Core types for the tool gate. Pure data, no side effects."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable, Mapping
 
@@ -46,3 +46,7 @@ class Result:
     message: str
     private: bool = False           # True: show on screen only, never send to a cloud service (e.g. text-to-speech)
     question: bool = False          # True: the AI asked you something, so J.A.R.V.I.S listens for the answer
+    ai_reply: bool = False          # True: the message is the AI's own words (not a tool's output)
+    # The action the AI proposed for this turn, e.g. {"tool": "open_app", "args": {"name": "notepad"}}.
+    # Only the AI's own proposal, never the tool's output, so it is safe to remember in a conversation.
+    action: dict | None = field(default=None, compare=False)
