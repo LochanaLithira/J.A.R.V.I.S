@@ -23,10 +23,12 @@ from __future__ import annotations
 
 import logging
 import logging.handlers
+import math
 import queue
 import sys
 import threading
 import time
+from collections import deque
 from enum import Enum
 from typing import Any, Callable
 
@@ -37,7 +39,7 @@ from .flow import Flow, FlowError
 from .gate.gate import Gate
 from .gate.models import Result
 from .tools.timers import TimerService
-from .voice.listen import CommandRecorder, GroqTranscriber, Heard, SileroVAD, SpeechInput
+from .voice.listen import CommandRecorder, GroqTranscriber, Heard, SileroVAD, SpeechInput, VoiceCheck
 from .voice.keepalive import warm_all
 from .voice.speak import FishSpeaker, Voice
 from .voice.style import Style
@@ -107,14 +109,18 @@ def make_speech(audit: Any, on_recorded: Callable[[], None] | None = None) -> Sp
     """Silero VAD (local) to find your speech, Groq Whisper to turn it into text."""
     recorder = CommandRecorder(SileroVAD(config.MODELS_DIR), max_seconds=config.LISTEN_MAX_SECONDS,
                                no_speech_seconds=config.LISTEN_NO_SPEECH_SECONDS,
-                               end_silence=config.LISTEN_END_SILENCE_SECONDS)
+                               end_silence=config.LISTEN_END_SILENCE_SECONDS,
+                               min_speech=config.LISTEN_MIN_SPEECH_SECONDS,
+                               start_prob=config.LISTEN_START_CONFIDENCE, start_frames=3)
     transcriber = GroqTranscriber(lambda: get_secret("stt_api_key"), config.STT_MODEL, config.STT_LANGUAGE)
-    return SpeechInput(recorder, transcriber, audit, on_recorded=on_recorded)
+    return SpeechInput(recorder, transcriber, audit, on_recorded=on_recorded,
+                       unfinished_extra_seconds=config.LISTEN_UNFINISHED_EXTRA_SECONDS)
 
 
 _NOTHING_HEARD = {
     "no speech": "I didn't hear anything.",
     "too short": "That was too short to understand.",
+    "noise": "That sounded like background noise, so I ignored it.",
     "stopped": "Stopped.",
 }
 
@@ -128,12 +134,20 @@ def describe_heard(heard: Heard) -> str:
 
 
 _STOP_PHRASES = {"stop", "cancel", "never mind", "nevermind", "nothing", "no thanks", "no thank you",
-                 "thats all", "thats it", "thank you", "thanks", "nothing else", "forget it"}
+                 "thats all", "thats it", "thank you", "thanks", "nothing else", "forget it",
+                 "goodbye", "bye", "bye bye", "good bye", "that will be all", "thats all for now", "thats all thanks",
+                 "thats all thank you", "go to sleep", "ok thanks", "okay thanks", "ok thank you", "okay thank you",
+                 "no thats all", "no thats it", "thanks thats all", "thank you thats all", "see you", "see you later",
+                 "leave the conversation", "end the conversation", "stop listening"}
 
 
 def is_stop_phrase(text: str) -> bool:
-    """True for "stop", "cancel", "that's all" and the like, which end a follow-up."""
+    """True for "that's all", "goodbye", "thanks, Jarvis", "stop" and the like, which end a
+    conversation (and are never sent to the AI as a command)."""
     plain = " ".join("".join(ch for ch in text.lower() if ch.isalpha() or ch == " ").split())
+    for prefix in ("hey jarvis ", "jarvis ", "ok ", "okay "):
+        if plain.startswith(prefix) and plain[len(prefix):] in _STOP_PHRASES:
+            return True
     plain = plain.removeprefix("jarvis ").removesuffix(" jarvis").removesuffix(" sir")
     return plain in _STOP_PHRASES
 
@@ -191,8 +205,11 @@ class Assistant:
                  on_status: Callable[[Status, str], None] | None = None,
                  on_notice: Callable[[str], None] | None = None, out: Callable[[str], None] | None = None,
                  warm: Callable[[], None] | None = None,
-                 follow_up_on_question: bool = True, follow_up_always: bool = False,
+                 follow_up_on_question: bool = True,
                  follow_up_seconds: float = 5.0, follow_up_max_turns: int = 3,
+                 conversation: bool = False, conversation_seconds: float = 8.0,
+                 conversation_max_turns: int = 10, conversation_max_seconds: float = 180.0,
+                 memory_turns: int = 6,
                  close_chime: Callable[[], None] = play_close_chime,
                  alarm: Callable[[], None] | None = None,
                  on_event: Callable[[str, dict], None] | None = None,
@@ -201,8 +218,12 @@ class Assistant:
                  retry_seconds: float = RETRY_SECONDS, mic_idle_seconds: float = MIC_IDLE_SECONDS):
         self._triggers, self._speech, self._get_flow, self._voice = triggers, speech, get_flow, voice
         self._warm = warm                     # reconnect to the cloud services while you speak
-        self._follow_on_question, self._follow_always = follow_up_on_question, follow_up_always
+        self._follow_on_question = follow_up_on_question
         self._follow_seconds, self._follow_max = follow_up_seconds, follow_up_max_turns
+        self._conversation = conversation      # keep listening after every reply, until goodbye or silence
+        self._conv_seconds, self._conv_max_turns = conversation_seconds, conversation_max_turns
+        self._conv_max_seconds = conversation_max_seconds
+        self._memory_turns = max(1, min(6, memory_turns))
         self._close_chime = close_chime
         self._alarm = alarm or _play_alarm_and_wait
         self._announcements: queue.Queue[str] = queue.Queue()   # finished timers, from the timer thread
@@ -435,48 +456,86 @@ class Assistant:
         self._emit_heard(heard)
         if heard.error:
             self._notice(heard.error)
+        elif heard.text and is_stop_phrase(heard.text):
+            self._goodbye()                      # "hey jarvis... never mind"
         elif heard.text:
             act_s, voice_s, result = self._act(heard.text)
             # durations only, never words: shows where the time goes
             log.info("timing: listening and hearing %.1fs, AI and action %.1fs, voice %.1fs",
                      heard_s, act_s, voice_s)
-            self._follow_up(mic, heard.text, result)
+            self._converse(mic, heard.text, result)
 
-    # ---- follow-ups: answering without the wake word -----------------------------
-    def _wants_follow_up(self, result: Any) -> bool:
+    # ---- conversation: carrying on without the wake word -----------------------------
+    def _keeps_going(self, result: Any) -> bool:
         if result is None:
             return False
-        if self._follow_always:
+        if self._conversation:
             return True
         return self._follow_on_question and getattr(result, "question", False) is True
 
-    def _follow_up(self, mic: Any, said: str, result: Any) -> None:
-        """After a question (or after every reply, if that setting is on), chime and listen once
-        more without "hey jarvis". Silence, "stop"/"cancel", or the turn limit end it."""
-        turns = 0
-        while self._wants_follow_up(result) and self._speech is not None and self.listening_allowed():
-            if turns >= self._follow_max:
+    @staticmethod
+    def _turn(said: str, result: Any) -> Turn | None:
+        """What to remember of one exchange: the AI's own words or proposed action, never a tool's
+        output. Fails closed: a result that says neither gives nothing to remember."""
+        if result is None:
+            return None
+        action = getattr(result, "action", None)
+        if isinstance(action, dict):
+            return Turn(said, action=action)
+        if getattr(result, "ai_reply", False) is True or getattr(result, "question", False) is True:
+            return Turn(said, reply=result.message)
+        return None
+
+    def _goodbye(self) -> None:
+        """Close the conversation politely: a short farewell, then the closing tone."""
+        if self._style is not None and self._voice is not None:
+            line = self._style.farewell()
+            self._emit("said", text=line)
+            self._say_out(f"J.A.R.V.I.S: {line}")
+            self._speak_line(line)
+        self._close_chime()
+
+    def _converse(self, mic: Any, said: str, result: Any) -> None:
+        """Carry on listening without "hey jarvis": after every reply in conversation mode, or
+        after a question otherwise. It ends on a goodbye ("that's all", "thanks, Jarvis"), on
+        silence, at the turn or time limit, or when listening is paused, locked or asleep.
+        The last few exchanges are remembered for this conversation only."""
+        conv = self._conversation
+        window = self._conv_seconds if conv else self._follow_seconds
+        max_turns = self._conv_max_turns if conv else self._follow_max
+        max_seconds = self._conv_max_seconds if conv else math.inf
+        memory: deque = deque(maxlen=self._memory_turns)
+        first = self._turn(said, result)
+        if first is not None:
+            memory.append(first)
+        started, turns = time.monotonic(), 0
+        while self._keeps_going(result) and self._speech is not None and self.listening_allowed():
+            if turns >= max_turns or time.monotonic() - started >= max_seconds:
                 self._close_chime()
                 self._say_out("(say 'hey jarvis' to start again)")
                 return
             turns += 1
-            history = (Turn(said, result.message),) if getattr(result, "question", False) else ()
             mic.drain()                          # never record J.A.R.V.I.S's own voice
             self._chime()
-            self._say_out("(listening for your answer...)")
-            self._emit("hearing", follow_up=True)
+            self._say_out("(listening...)" if conv else "(listening for your answer...)")
+            self._emit("hearing", follow_up=True, conversation=conv)
             heard = self._speech.hear(self._metered(mic.chunks(self._interrupt, idle_timeout=self._mic_idle)),
-                                      no_speech_seconds=self._follow_seconds)
+                                      no_speech_seconds=window)
             self._say_out(describe_heard(heard))
             self._emit_heard(heard)
             if heard.error:
                 self._notice(heard.error)
                 return
-            if not heard.text or is_stop_phrase(heard.text):
-                self._close_chime()
+            if not heard.text:
+                self._close_chime()              # silence: back to waiting for "hey jarvis"
                 return
-            _, _, result = self._act(heard.text, history)
-            said = heard.text
+            if is_stop_phrase(heard.text):
+                self._goodbye()
+                return
+            _, _, result = self._act(heard.text, tuple(memory))
+            turn = self._turn(heard.text, result)
+            if turn is not None:
+                memory.append(turn)
 
     def _emit_heard(self, heard: Heard) -> None:
         if heard.error:
@@ -539,13 +598,19 @@ def build_assistant(audit: Any, get_flow: Callable[[], Flow] | None, voice: Voic
     if config.CLAP_ENABLED:
         on_clap = (lambda level: out(f"  (clap heard, level {level:.0f})")) if out else None
         clap = ClapDetector(config.CLAP_MIN_LEVEL, on_clap=on_clap)
+    voice_check = (VoiceCheck(SileroVAD(config.MODELS_DIR), config.WAKE_MIN_SPEECH_SECONDS,
+                              config.WAKE_SPEECH_CONFIDENCE) if config.WAKE_SPEECH_CHECK else None)
     triggers = Triggers(wake, clap, config.WAKE_THRESHOLD, config.WAKE_PATIENCE,
-                        config.WAKE_COOLDOWN_SECONDS, audit=audit)
+                        config.WAKE_COOLDOWN_SECONDS, audit=audit, voice_check=voice_check)
     return Assistant(triggers, make_speech(audit, on_recorded=play_done_chime), get_flow, voice,
                      pick_microphone(config.MIC_DEVICE), show_text=show_text, on_status=on_status,
                      on_notice=on_notice, out=out, warm=warm_all,
-                     follow_up_on_question=config.FOLLOW_UP_ON_QUESTION, follow_up_always=config.FOLLOW_UP_ALWAYS,
+                     follow_up_on_question=config.FOLLOW_UP_ON_QUESTION,
                      follow_up_seconds=config.FOLLOW_UP_SECONDS, follow_up_max_turns=config.FOLLOW_UP_MAX_TURNS,
+                     conversation=config.CONVERSATION_MODE, conversation_seconds=config.CONVERSATION_SECONDS,
+                     conversation_max_turns=config.CONVERSATION_MAX_TURNS,
+                     conversation_max_seconds=config.CONVERSATION_MAX_SECONDS,
+                     memory_turns=config.CONVERSATION_MEMORY_TURNS,
                      on_event=on_event, on_level=on_level, style=style or Style(config.USER_ADDRESS))
 
 
@@ -573,7 +638,8 @@ _HUD_STATE = {Status.STARTING: "starting", Status.LISTENING: "listening", Status
               Status.PROBLEM: "problem", Status.STOPPED: "paused"}
 _STATUS_ACTIVITY = {Status.PAUSED: ("listening paused", "warn"), Status.LOCKED: ("Windows locked: microphone off", "warn"),
                     Status.ASLEEP: ("asleep: microphone off", "warn")}
-_NOTHING_ACTIVITY = {"no speech": "heard nothing", "too short": "too short to understand", "stopped": "stopped"}
+_NOTHING_ACTIVITY = {"no speech": "heard nothing", "too short": "too short to understand", "stopped": "stopped",
+                     "noise": "ignored background noise"}
 
 
 def screen_feed(screen: Any) -> tuple[Callable[[Status, str], None], Callable[[str, dict], None]]:
@@ -591,7 +657,9 @@ def screen_feed(screen: Any) -> tuple[Callable[[Status, str], None], Callable[[s
             score = data.get("score")
             screen.add_activity(f"wake · {data.get('source', '')}" + (f" {score:.2f}" if score is not None else ""))
         elif kind == "hearing":
-            screen.set_state("hearing", "your answer" if data.get("follow_up") else "go ahead")
+            detail = ("in conversation" if data.get("conversation") else "your answer") if data.get("follow_up") \
+                else "go ahead"
+            screen.set_state("hearing", detail)
         elif kind == "heard":
             screen.add_message("you", data.get("text", ""))
         elif kind == "nothing":

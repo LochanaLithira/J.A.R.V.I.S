@@ -15,6 +15,7 @@ from __future__ import annotations
 import os
 import time
 from collections import deque
+from dataclasses import replace
 from typing import Any, Callable, TypedDict
 
 from langgraph.graph import END, START, StateGraph
@@ -104,7 +105,7 @@ class Flow:
 
         if reply.proposal is None:
             self._audit.record("said", text=reply.text)
-            return {"result": Result(True, reply.text, question=reply.text.rstrip().endswith("?"))}
+            return {"result": Result(True, reply.text, question=reply.text.rstrip().endswith("?"), ai_reply=True)}
         return {"reply": reply}
 
     @staticmethod
@@ -114,4 +115,7 @@ class Flow:
 
     def _guard(self, state: _State) -> dict[str, Any]:
         proposal = state["reply"].proposal
-        return {"result": self._gate.execute(proposal.tool, proposal.args)}
+        result = self._gate.execute(proposal.tool, proposal.args)
+        # Remember what the AI proposed (its own words), never what the tool returned.
+        action = {"tool": proposal.tool, "args": dict(proposal.args) if isinstance(proposal.args, dict) else {}}
+        return {"result": replace(result, action=action)}

@@ -73,6 +73,18 @@ def test_replies_that_ask_something_are_marked(tmp_path, text, question):
     assert result.question is question
 
 
+def test_results_record_the_proposal_but_not_as_the_ai_s_words(tmp_path):
+    result = Flow(ScriptedBrain(action("open_app", name="notepad")), make_gate(tmp_path)).run("open notepad")
+    assert result.action == {"tool": "open_app", "args": {"name": "notepad"}} and result.ai_reply is False
+    reply = Flow(ScriptedBrain(BrainReply(text="Good day, sir.")), make_gate(tmp_path)).run("hello")
+    assert reply.ai_reply is True and reply.action is None
+
+
+def test_refused_actions_still_record_what_was_proposed(tmp_path):
+    result = Flow(ScriptedBrain(action("format_disk")), make_gate(tmp_path)).run("wipe it")
+    assert not result.ok and result.action == {"tool": "format_disk", "args": {}}
+
+
 def test_tool_results_are_never_marked_as_questions(tmp_path):
     gate = make_gate(tmp_path)
     gate.execute("create_note", {"title": "q", "text": "is this a question?"})

@@ -62,11 +62,19 @@ MIC_DEVICE = "Microphone Array"
 WAKE_THRESHOLD = 0.25
 WAKE_PATIENCE = 1                # slices of 80 ms in a row that must pass the threshold
 WAKE_COOLDOWN_SECONDS = 1.5      # after a wake, ignore triggers for this long
+# Only wake up if the moment "hey jarvis" was heard really contained a human voice (checked on
+# this laptop). Over 4 days, 28 of 41 wake-ups were background noise; this check drops those.
+WAKE_SPEECH_CHECK = True
+# Measured with synthetic sounds: at 0.7 confidence a spoken "hey jarvis" gives ~0.7 s of voice,
+# fast knocking 0.38 s, keyboard typing and hiss 0 s. If your real "hey jarvis" is ever ignored,
+# the audit log shows "wake_rejected": lower these a little.
+WAKE_SPEECH_CONFIDENCE = 0.7     # how sure the local voice detector must be, per 32 ms frame
+WAKE_MIN_SPEECH_SECONDS = 0.4    # at least this much voice in the last ~2 seconds
 
-# Double clap. CLAP_MIN_LEVEL is how loud a clap must be. Your claps measured 815-1993 on the
-# built-in mic; claps are told apart from speech mainly by how suddenly they start and how fast
-# they fade. The listen command prints the level of each clap it hears, so you can tune it.
-CLAP_ENABLED = True
+# Double clap. OFF by default: knocks, desk taps and doors look like claps to a laptop mic (13 of
+# 17 clap wake-ups in 4 days were false). CLAP_MIN_LEVEL is how loud a clap must be; your claps
+# measured 815-1993 on the built-in mic. The listen command prints each clap's level for tuning.
+CLAP_ENABLED = False
 CLAP_MIN_LEVEL = 600
 
 
@@ -77,13 +85,30 @@ STT_MODEL = "whisper-large-v3-turbo"
 STT_LANGUAGE = "en"
 LISTEN_MAX_SECONDS = 15.0        # longest command
 LISTEN_NO_SPEECH_SECONDS = 5.0   # give up if you don't start speaking within this time
-LISTEN_END_SILENCE_SECONDS = 0.8 # this much quiet means you've finished
+LISTEN_END_SILENCE_SECONDS = 1.2 # this much quiet means you've finished (room to pause mid-sentence)
+# If what you said clearly stops mid-sentence ("open the...", "make a note called..."), keep
+# listening this much longer for the rest and join the two parts. 0 turns this off.
+LISTEN_UNFINISHED_EXTRA_SECONDS = 2.0
+# What counts as speech, so background sound is never sent: how sure the local voice detector
+# must be that speech has started (0-1), and the least speech that makes a command.
+LISTEN_START_CONFIDENCE = 0.6
+LISTEN_MIN_SPEECH_SECONDS = 0.4
 
 # ---- Follow-ups: answering without "hey jarvis" ----
 # When J.A.R.V.I.S asks you a question ("Which app, sir?"), it chimes and listens for your answer.
+# (Used when conversation mode, below, is off.)
 FOLLOW_UP_ON_QUESTION = True
-# Alexa-style: also listen for a few seconds after EVERY reply. Off by default, because anything
-# said in that window (by anyone, or a TV) is sent to Groq and may be acted on.
-FOLLOW_UP_ALWAYS = False
 FOLLOW_UP_SECONDS = 5.0          # how long to wait for you to start speaking
 FOLLOW_UP_MAX_TURNS = 3          # after this many follow-ups in a row, say "hey jarvis" again
+
+# ---- Conversation mode: one "hey jarvis", then keep talking ----
+# After every reply J.A.R.V.I.S chimes and keeps listening, so you can carry on without the wake
+# word. It ends when you say "that's all", "goodbye", "thanks, Jarvis" or "stop", when you stay
+# quiet, at the limits below, or when Windows is locked. While a conversation is open, anything
+# said near the laptop (by anyone, or a TV) is sent to Groq and may be acted on; silence never is,
+# and risky actions still need your keypress. Set to False to need "hey jarvis" for every command.
+CONVERSATION_MODE = True
+CONVERSATION_SECONDS = 8.0       # how long it waits for you to start speaking again
+CONVERSATION_MAX_TURNS = 10      # commands in one conversation, then "hey jarvis" again
+CONVERSATION_MAX_SECONDS = 180.0 # longest conversation, then "hey jarvis" again
+CONVERSATION_MEMORY_TURNS = 6    # recent exchanges sent to Gemini so follow-ups make sense (max 6)
