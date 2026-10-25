@@ -263,6 +263,104 @@ def test_reset_forgets_old_sound(models_dir, spoken):
     assert all(t.process(c) is None for c in slices(np.zeros(16000)))
 
 
+# ---- the voice check at wake-up (synthetic audio only) ---------------------------------------
+
+def test_wake_without_a_voice_is_ignored_and_audited(audit):
+    asked = []
+
+    def check(chunks):
+        asked.append(len(chunks))
+        return False
+
+    t = Triggers(FakeWake([0.1, 0.4]), threshold=0.25, audit=audit, voice_check=check)
+    assert [t.process(CH), t.process(CH)] == [None, None]
+    assert asked == [2] and t.rejected == 1
+    row = audit.path.read_text()
+    assert '"event":"wake_rejected"' in row and '"reason":"no voice"' in row and '"event":"wake"' not in row
+
+
+def test_wake_with_a_voice_goes_ahead():
+    t = Triggers(FakeWake([0.4]), threshold=0.25, voice_check=lambda chunks: True)
+    assert t.process(CH) == WakeEvent("hey jarvis", 0.4)
+
+
+def test_a_rejected_moment_is_not_rechecked_every_slice():
+    now, asked = [0.0], []
+    t = Triggers(FakeWake([0.4] * 20), threshold=0.25, clock=lambda: now[0],
+                 voice_check=lambda chunks: asked.append(1) or False)
+    for _ in range(10):                                       # 0.8 s of high scores
+        now[0] += 0.08
+        t.process(CH)
+    assert len(asked) == 1
+    now[0] += 1.0
+    t.process(CH)
+    assert len(asked) == 2
+
+
+def test_a_broken_check_never_makes_it_deaf():
+    def boom(chunks):
+        raise RuntimeError("model missing")
+
+    assert Triggers(FakeWake([0.4]), threshold=0.25, voice_check=boom).process(CH) is not None
+
+
+def test_only_about_two_seconds_are_kept_and_reset_clears_them():
+    t = Triggers(FakeWake([0.0] * 40), voice_check=lambda chunks: True)
+    for _ in range(40):
+        t.process(CH)
+    assert len(t._recent) == Triggers.RECENT_CHUNKS
+    t.reset()
+    assert len(t._recent) == 0
+
+
+def test_claps_are_not_voice_checked():
+    asked = []
+    t = Triggers(FakeWake([0.0]), FakeClap([True]), voice_check=lambda c: asked.append(1) or False)
+    assert t.process(CH) == WakeEvent("double clap") and asked == []
+
+
+def _hum(seconds, hz=120):
+    t = np.arange(int(16000 * seconds)) / 16000
+    return (np.sin(2 * np.pi * hz * t) * 4000).astype(np.int16)
+
+
+def _clicks(seconds):
+    audio = np.zeros(int(16000 * seconds))
+    for start in range(0, len(audio) - 200, 2400):          # a knock every 0.15 s
+        audio[start:start + 200] = np.random.default_rng(start).normal(0, 9000, 200)
+    return audio.astype(np.int16)
+
+
+def _typing(seconds):
+    audio = np.zeros(int(16000 * seconds))
+    for start in range(0, len(audio) - 80, 1760):             # a key every 0.11 s
+        audio[start:start + 80] = np.random.default_rng(start).normal(0, 3000, 80) * np.exp(-np.arange(80) / 60)
+    return audio.astype(np.int16)
+
+
+def real_check(models_dir):
+    from backend.voice.listen import SileroVAD, VoiceCheck
+
+    return VoiceCheck(SileroVAD(models_dir), config.WAKE_MIN_SPEECH_SECONDS, config.WAKE_SPEECH_CONFIDENCE)
+
+
+@pytest.mark.parametrize("make", [
+    lambda: np.random.default_rng(2).normal(0, 2500, 32000).astype(np.int16),          # hiss / fan
+    lambda: np.cumsum(np.random.default_rng(3).normal(0, 300, 32000)).clip(-12000, 12000).astype(np.int16),
+    lambda: _hum(2.0),                                                                  # mains hum
+    lambda: _clicks(2.0),                                                               # fast knocking
+    lambda: _typing(2.0),                                                               # keyboard
+], ids=["hiss", "rumble", "hum", "knocks", "typing"])
+def test_real_voice_check_ignores_background_sounds(models_dir, make):
+    assert real_check(models_dir)(slices(make())) is False
+
+
+def test_real_voice_check_hears_a_spoken_wake_word(models_dir, spoken):
+    wake = spoken["wake"][16000:-16000]                       # the phrase without its padding
+    at_wake_time = np.concatenate([np.zeros(16000, np.int16), wake, np.zeros(6400, np.int16)])[-32000:]
+    assert real_check(models_dir)(slices(at_wake_time)) is True
+
+
 def test_reset_calls_both_detectors():
     seen = []
 

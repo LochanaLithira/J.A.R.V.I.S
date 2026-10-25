@@ -280,13 +280,20 @@ class WakeEvent:
 
 class Triggers:
     """Combines both detectors and applies the wake rules: threshold, patience, cooldown, and
-    silence while J.A.R.V.I.S itself is talking (so its own voice can never wake it)."""
+    silence while J.A.R.V.I.S itself is talking (so its own voice can never wake it).
+
+    With `voice_check`, a "hey jarvis" only counts if the last ~2 seconds really contained a
+    human voice; a fan, a door or a knock that happens to score like the wake word is ignored.
+    That audio is kept in memory only, and only for those 2 seconds."""
 
     MUTE_TAIL_SECONDS = 1.0            # stay deaf this long after speech ends (echo, room reverb)
+    RECENT_CHUNKS = 24                 # about 2 seconds of audio, in memory only, for the voice check
+    REJECT_PAUSE_SECONDS = 1.0         # after a rejected wake-up, don't check again for a moment
 
     def __init__(self, wake: WakeWordDetector | None = None, clap: ClapDetector | None = None,
                  threshold: float = 0.25, patience: int = 1, cooldown_seconds: float = 1.5,
-                 audit: Any = None, clock: Callable[[], float] = time.monotonic):
+                 audit: Any = None, clock: Callable[[], float] = time.monotonic,
+                 voice_check: Callable[[list], bool] | None = None):
         if not 0.0 < threshold < 1.0:
             raise ValueError("threshold must be between 0 and 1")
         if not isinstance(patience, int) or patience < 1:
@@ -294,11 +301,15 @@ class Triggers:
         self._wake, self._clap = wake, clap
         self._threshold, self._patience, self._cooldown = threshold, patience, cooldown_seconds
         self._audit, self._clock = audit, clock
+        self._voice_check = voice_check
+        self._recent: deque = deque(maxlen=self.RECENT_CHUNKS)
         self._above = 0
         self._last_wake = -math.inf
+        self._last_reject = -math.inf
         self._muted = False
         self._muted_until = -math.inf
         self.last_score = 0.0
+        self.rejected = 0                  # wake-ups dropped because no voice was heard
 
     def reset(self) -> None:
         """Start fresh after a gap in the audio (while a command was recorded or a reply spoken),
@@ -307,6 +318,7 @@ class Triggers:
             if detector is not None and hasattr(detector, "reset"):
                 detector.reset()
         self._above = 0
+        self._recent.clear()
 
     def set_muted(self, muted: bool) -> None:
         """Call with True while J.A.R.V.I.S is speaking, and False when it stops."""
@@ -319,6 +331,8 @@ class Triggers:
         clapped = self._clap.feed(chunk) if self._clap is not None else False
         self.last_score = score
         self._above = self._above + 1 if score > self._threshold else 0
+        if self._voice_check is not None:
+            self._recent.append(chunk)
 
         now = self._clock()
         if self._muted or now < self._muted_until:
@@ -332,6 +346,20 @@ class Triggers:
             return None
         if now - self._last_wake < self._cooldown:
             return None
+        if event.source == "hey jarvis" and self._voice_check is not None:
+            if now - self._last_reject < self.REJECT_PAUSE_SECONDS:
+                self._above = 0
+                return None
+            try:
+                voiced = bool(self._voice_check(list(self._recent)))
+            except Exception:
+                voiced = True                    # a broken check must not make J.A.R.V.I.S deaf
+            if not voiced:
+                self._last_reject, self._above = now, 0
+                self.rejected += 1
+                if self._audit is not None:
+                    self._audit.record("wake_rejected", source=event.source, score=event.score, reason="no voice")
+                return None
         self._last_wake = now
         self._above = 0
         if self._audit is not None:
