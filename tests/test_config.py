@@ -64,7 +64,17 @@ def test_wake_settings_are_sane():
 
 def test_follow_up_settings_are_sane():
     assert config.FOLLOW_UP_ON_QUESTION is True                 # answering a question needs no wake word
-    assert config.FOLLOW_UP_ALWAYS is False                     # the open window after every reply is opt-in
+    assert not hasattr(config, "FOLLOW_UP_ALWAYS")              # replaced by conversation mode
+
+
+def test_conversation_settings_are_sane():
+    assert isinstance(config.CONVERSATION_MODE, bool)
+    assert 3 <= config.CONVERSATION_SECONDS <= 15
+    assert 1 <= config.CONVERSATION_MAX_TURNS <= 20
+    assert 30 <= config.CONVERSATION_MAX_SECONDS <= 600       # a conversation can't stay open for long
+    assert 1 <= config.CONVERSATION_MEMORY_TURNS <= 6
+    assert 1.0 <= config.LISTEN_END_SILENCE_SECONDS <= 2.0
+    assert 0 <= config.LISTEN_UNFINISHED_EXTRA_SECONDS <= 4
     assert 2 <= config.FOLLOW_UP_SECONDS <= 10
     assert 1 <= config.FOLLOW_UP_MAX_TURNS <= 5
 

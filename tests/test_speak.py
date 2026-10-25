@@ -347,7 +347,8 @@ def test_console_say_speaks_the_result(tmp_path):
 
     out = handle_line(gate, AuditLog(log), "say read my note", get_flow=lambda: Flow(),
                       voice=Voice(speaker, background=False))
-    assert out == "OK: secret text" and speaker.said == [PRIVATE_REPLY]
+    assert out == "OK: secret text" and len(speaker.said) == 1
+    assert "screen" in speaker.said[0] and "secret" not in speaker.said[0]     # a fixed line, never the content
 
 
 def test_console_voice_commands(tmp_path):
