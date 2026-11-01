@@ -21,10 +21,13 @@ Safety rules this file adds:
 """
 from __future__ import annotations
 
+import dataclasses
+import itertools
 import logging
 import logging.handlers
 import math
 import queue
+import re
 import sys
 import threading
 import time
@@ -43,13 +46,15 @@ from .voice.listen import CommandRecorder, GroqTranscriber, Heard, SileroVAD, Sp
 from .voice.keepalive import warm_all
 from .voice.speak import FishSpeaker, Voice
 from .voice.style import Style
-from .voice.triggers import (ALARM_CHIME, ClapDetector, Microphone, TriggerError, Triggers, WakeEvent,
-                             WakeWordDetector, pick_microphone, play_chime, play_close_chime, play_done_chime)
+from .voice.triggers import (ALARM_CHIME, CHUNK, SAMPLE_RATE, ClapDetector, Microphone, TriggerError, Triggers,
+                             WakeEvent, WakeWordDetector, pick_microphone, play_chime, play_close_chime,
+                             play_done_chime)
 
 log = logging.getLogger("jarvis")
 
 MIC_IDLE_SECONDS = 5.0           # a microphone silent at driver level for this long is reopened
 TIMER_DONE_LINE = "Sir, your timer is done."
+PRE_ROLL_SECONDS = 1.6           # sound kept from just before the wake word was confirmed
 RETRY_SECONDS = 5.0              # wait before retrying after a problem (a missing mic, for example)
 
 
@@ -141,6 +146,24 @@ _STOP_PHRASES = {"stop", "cancel", "never mind", "nevermind", "nothing", "no tha
                  "leave the conversation", "end the conversation", "stop listening"}
 
 
+_WAKE_WORDS_RE = re.compile(
+    r"^\s*(?:(?:hey|ok|okay|a)[\s,.!?-]*)?(?:jarvis|travis|javis|jervis|jarvi)\b[\s,.!?-]*",
+    re.IGNORECASE)
+
+
+def strip_wake_words(text: str) -> str:
+    """ "Hey Jarvis, open the downloads." -> "Open the downloads." (also common mishearings)."""
+    if not isinstance(text, str):
+        return ""
+    original = text
+    for _ in range(2):                         # "Hey Jarvis. Jarvis, ..." said twice
+        text = _WAKE_WORDS_RE.sub("", text, count=1)
+    if text == original:
+        return original.strip()                # nothing removed: leave it exactly as heard
+    text = text.strip()
+    return text[:1].upper() + text[1:] if text else ""
+
+
 def is_stop_phrase(text: str) -> bool:
     """True for "that's all", "goodbye", "thanks, Jarvis", "stop" and the like, which end a
     conversation (and are never sent to the AI as a command)."""
@@ -209,7 +232,8 @@ class Assistant:
                  follow_up_seconds: float = 5.0, follow_up_max_turns: int = 3,
                  conversation: bool = False, conversation_seconds: float = 8.0,
                  conversation_max_turns: int = 10, conversation_max_seconds: float = 180.0,
-                 memory_turns: int = 6,
+                 memory_turns: int = 6, wake_reply: bool = False, wake_reply_delay: float = 0.7,
+                 speech_probe: Any = None,
                  close_chime: Callable[[], None] = play_close_chime,
                  alarm: Callable[[], None] | None = None,
                  on_event: Callable[[str, dict], None] | None = None,
@@ -224,6 +248,9 @@ class Assistant:
         self._conv_seconds, self._conv_max_turns = conversation_seconds, conversation_max_turns
         self._conv_max_seconds = conversation_max_seconds
         self._memory_turns = max(1, min(6, memory_turns))
+        self._wake_reply = wake_reply           # say "Yes, sir?" on waking instead of only chiming
+        self._reply_delay = wake_reply_delay    # first wait this long, in case you carry straight on
+        self._speech_probe = speech_probe       # local voice detector used for that check
         self._close_chime = close_chime
         self._alarm = alarm or _play_alarm_and_wait
         self._announcements: queue.Queue[str] = queue.Queue()   # finished timers, from the timer thread
@@ -434,9 +461,48 @@ class Assistant:
             self._triggers.reset()               # and start the wake-up fresh
             self._set_status(Status.LISTENING)
 
+    def _still_talking(self, chunks: list) -> bool:
+        """Did you carry straight on after "hey jarvis"? Checked on this laptop, from memory."""
+        if self._speech_probe is not None:
+            try:
+                return self._speech_probe.speech_seconds(chunks, prob=0.5) >= 0.2
+            except Exception:
+                pass
+        return sum(1 for c in chunks if sound_level(c) > 0.3) >= 2
+
+    def _acknowledge(self, mic: Any) -> list:
+        """Let you know it heard you, without talking over you.
+
+        It first listens for a moment. If you carried straight on ("hey jarvis, open notepad"),
+        it stays quiet and returns what you said so far, which becomes the start of the command.
+        If you paused, it says "Yes, sir?" (or plays the chime) and returns nothing. What the
+        microphone hears while J.A.R.V.I.S speaks is dropped, so it never records itself."""
+        if not (self._wake_reply and self._voice is not None and self._style is not None):
+            self._chime()
+            return []
+        pause: list = []
+        for chunk in mic.chunks(self._interrupt, idle_timeout=self._mic_idle):
+            pause.append(chunk)
+            if len(pause) * CHUNK / SAMPLE_RATE >= self._reply_delay:
+                break
+        if not self.listening_allowed():
+            return []
+        if self._still_talking(pause):
+            # One breath ("hey jarvis, open the downloads"): no reply. Include the moment before the
+            # wake word was confirmed, or the first words of the command would be lost.
+            before = self._triggers.recent(PRE_ROLL_SECONDS) if hasattr(self._triggers, "recent") else []
+            return list(before) + pause
+        line = self._style.acknowledge()
+        self._emit("said", text=line)
+        self._say_out(f"J.A.R.V.I.S: {line}")
+        if self._speak_line(line):
+            mic.drain()
+            return []
+        self._chime()
+        return []
+
     def _handle(self, event: WakeEvent, mic: Any) -> None:
         self._set_status(Status.WORKING)
-        self._chime()
         if self._warm is not None:
             try:
                 self._warm()
@@ -445,18 +511,22 @@ class Assistant:
         detail = f" (score {event.score:.2f})" if event.score is not None else ""
         self._say_out(f"WAKE: {event.source}{detail}")
         self._emit("wake", source=event.source, score=event.score)
+        already_said = self._acknowledge(mic)
         t0 = time.monotonic()
         if self._speech is None:
             heard = Heard(error="Speech input is not set up.")
         else:
             self._emit("hearing", follow_up=False)
-            heard = self._speech.hear(self._metered(mic.chunks(self._interrupt, idle_timeout=self._mic_idle)))
+            stream = itertools.chain(already_said, mic.chunks(self._interrupt, idle_timeout=self._mic_idle))
+            heard = self._without_wake_words(self._speech.hear(self._metered(stream)))
         heard_s = time.monotonic() - t0
         self._say_out(describe_heard(heard))
         self._emit_heard(heard)
         if heard.error:
             self._notice(heard.error)
-        elif heard.text and is_stop_phrase(heard.text):
+        elif not heard.text:
+            self._close_chime()                  # nothing said after waking: it has stopped listening
+        elif is_stop_phrase(heard.text):
             self._goodbye()                      # "hey jarvis... never mind"
         elif heard.text:
             act_s, voice_s, result = self._act(heard.text)
@@ -519,8 +589,9 @@ class Assistant:
             self._chime()
             self._say_out("(listening...)" if conv else "(listening for your answer...)")
             self._emit("hearing", follow_up=True, conversation=conv)
-            heard = self._speech.hear(self._metered(mic.chunks(self._interrupt, idle_timeout=self._mic_idle)),
-                                      no_speech_seconds=window)
+            heard = self._without_wake_words(
+                self._speech.hear(self._metered(mic.chunks(self._interrupt, idle_timeout=self._mic_idle)),
+                                  no_speech_seconds=window))
             self._say_out(describe_heard(heard))
             self._emit_heard(heard)
             if heard.error:
@@ -536,6 +607,14 @@ class Assistant:
             turn = self._turn(heard.text, result)
             if turn is not None:
                 memory.append(turn)
+
+    @staticmethod
+    def _without_wake_words(heard: Heard) -> Heard:
+        """Drop "hey jarvis" from the front of what was heard; just the wake word is no command."""
+        if not heard.text:
+            return heard
+        text = strip_wake_words(heard.text)
+        return dataclasses.replace(heard, text=text) if text else Heard(reason="no speech")
 
     def _emit_heard(self, heard: Heard) -> None:
         if heard.error:
@@ -610,7 +689,8 @@ def build_assistant(audit: Any, get_flow: Callable[[], Flow] | None, voice: Voic
                      conversation=config.CONVERSATION_MODE, conversation_seconds=config.CONVERSATION_SECONDS,
                      conversation_max_turns=config.CONVERSATION_MAX_TURNS,
                      conversation_max_seconds=config.CONVERSATION_MAX_SECONDS,
-                     memory_turns=config.CONVERSATION_MEMORY_TURNS,
+                     memory_turns=config.CONVERSATION_MEMORY_TURNS, wake_reply=config.WAKE_REPLY,
+                     wake_reply_delay=config.WAKE_REPLY_DELAY_SECONDS, speech_probe=voice_check,
                      on_event=on_event, on_level=on_level, style=style or Style(config.USER_ADDRESS))
 
 
@@ -837,6 +917,9 @@ def main() -> int:
         holder["a"].start()
         if config.GREETING_ON_START:
             holder["a"].say_line(Style(config.USER_ADDRESS).greeting())
+        if config.WAKE_REPLY:                # prepare "Yes, sir?" now, so waking answers instantly
+            threading.Thread(target=voice.prefetch, args=(Style(config.USER_ADDRESS).acknowledgements(),),
+                             name="jarvis-prefetch", daemon=True).start()
     try:
         tray.run()                       # the Windows message loop; returns when you choose Quit
     finally:

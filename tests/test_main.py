@@ -393,6 +393,152 @@ def test_follow_ups_stop_after_the_turn_limit(run_assistant):
     assert len(flow.seen) == 1 + 3 and chimes == [1, 1, 1, 1, "close"]
 
 
+# ---- answering when woken ------------------------------------------------------------------------
+
+def test_waking_answers_out_loud_then_listens(run_assistant):
+    from backend.voice.style import Style
+
+    drains, order = [], []
+
+    class Mics(FakeMics):
+        def __call__(self, device):
+            mic = FakeMic(self)
+            mic.drain = lambda: drains.append(1) or 0
+            return mic
+
+    flow = FakeFlow()
+    a, trig, mics, statuses, notices, shown, chimes = run_assistant(
+        flow=flow, mics=Mics(), wake_reply=True, style=Style(choose=first_choice))
+    trig.fire.set()
+    assert wait_for(lambda: flow.seen == ["open notepad"])
+    assert a._voice.said[0] == ("Yes, sir?", True, True)       # spoken first, with the wake-up muted
+    assert chimes == [] and drains                             # no chime needed; its own voice is dropped
+
+
+def test_the_chime_is_used_when_it_cannot_speak(run_assistant):
+    from backend.voice.style import Style
+
+    triggers = FakeTriggers()
+    flow = FakeFlow()
+    a, trig, mics, statuses, notices, shown, chimes = run_assistant(
+        triggers=triggers, flow=flow, voice=FakeVoice(triggers, ok=False), wake_reply=True,
+        style=Style(choose=first_choice))
+    trig.fire.set()
+    assert wait_for(lambda: flow.seen == ["open notepad"])
+    assert chimes[0] == 1
+
+
+def test_waking_with_nothing_said_ends_with_the_closing_tone(run_assistant):
+    a, trig, mics, statuses, notices, shown, chimes = run_assistant(heard=Heard(reason="no speech"))
+    trig.fire.set()
+    assert wait_for(lambda: chimes == [1, "close"])
+
+
+class Probe:
+    """Stands in for the local voice detector: says whether you were still talking."""
+
+    def __init__(self, talking):
+        self.talking, self.checked = talking, []
+
+    def speech_seconds(self, chunks, prob=None):
+        self.checked.append(len(chunks))
+        return 1.0 if self.talking else 0.0
+
+
+class CountingSpeech(FakeSpeech):
+    """Counts how many slices of audio were handed to hearing, including the pause."""
+
+    def __init__(self, heard, take=12):
+        super().__init__(heard)
+        self.take, self.got = take, 0
+
+    def hear(self, chunks, no_speech_seconds=None):
+        for _ in zip(range(self.take), chunks):
+            self.got += 1
+        return super().hear(chunks, no_speech_seconds)
+
+
+def test_carrying_straight_on_gets_no_reply_and_keeps_your_words(run_assistant):
+    from backend.voice.style import Style
+
+    flow = FakeFlow()
+    probe = Probe(talking=True)
+    a, trig, mics, statuses, notices, shown, chimes = run_assistant(
+        flow=flow, wake_reply=True, style=Style(choose=first_choice), speech_probe=probe, wake_reply_delay=0.7)
+    a._speech = CountingSpeech(Heard(text="open notepad", reason="done"))
+    trig.fire.set()
+    assert wait_for(lambda: flow.seen == ["open notepad"])
+    assert probe.checked == [9]                                # 0.7 s of audio was checked (9 slices)
+    assert all(line != "Yes, sir?" for line, *_ in a._voice.said) and chimes == []
+    assert a._speech.got == 12                                 # the pause audio went into the command
+
+
+def test_one_breath_commands_keep_the_words_said_before_the_wake_word_was_confirmed(run_assistant):
+    from backend.voice.style import Style
+
+    class TriggersWithMemory(FakeTriggers):
+        def recent(self, seconds=1.6):
+            return [np.full(CHUNK, 7, np.int16)] * 20             # ~1.6 s from before the decision
+
+    triggers = TriggersWithMemory()
+    flow = FakeFlow()
+    a, trig, *_ = run_assistant(triggers=triggers, flow=flow, wake_reply=True, style=Style(choose=first_choice),
+                                speech_probe=Probe(talking=True), voice=FakeVoice(triggers))
+    seen = []
+
+    class FirstSlices(FakeSpeech):
+        def hear(self, chunks, no_speech_seconds=None):
+            for _, c in zip(range(25), chunks):
+                seen.append(int(c[0]))
+            return Heard(text="Hey Jarvis, open the download folder.", reason="done")
+
+    a._speech = FirstSlices(Heard(reason="done"))
+    trig.fire.set()
+    assert wait_for(lambda: flow.seen)
+    assert seen[:20] == [7] * 20 and seen[20:] == [0] * 5        # the earlier moment comes first
+    assert flow.seen == ["Open the download folder."]             # the wake word is not part of the command
+
+
+@pytest.mark.parametrize("text, cleaned", [
+    ("Hey Jarvis, open the download folder.", "Open the download folder."),
+    ("hey jarvis open notepad", "Open notepad"),
+    ("Jarvis, what's the time?", "What's the time?"),
+    ("Hey, Travis. Set a timer for five minutes.", "Set a timer for five minutes."),
+    ("Okay Jarvis... Jarvis, open notepad", "Open notepad"),
+    ("Open notepad", "Open notepad"),
+    ("Tell Jarvis hello", "Tell Jarvis hello"),                 # only at the start
+    ("Hello Jarvis.", "Hello Jarvis."),                         # a greeting, not the wake word
+    ("Hey Jarvis.", ""),
+])
+def test_strip_wake_words(text, cleaned):
+    assert main.strip_wake_words(text) == cleaned
+
+
+def test_only_the_wake_word_is_not_a_command(run_assistant):
+    flow = FakeFlow()
+    a, trig, mics, statuses, notices, shown, chimes = run_assistant(
+        flow=flow, heard=Heard(text="Hey Jarvis.", reason="done"))
+    trig.fire.set()
+    assert wait_for(lambda: chimes == [1, "close"])
+    assert flow.seen == []
+
+
+def test_pausing_after_the_wake_word_gets_a_reply(run_assistant):
+    from backend.voice.style import Style
+
+    flow = FakeFlow()
+    probe = Probe(talking=False)
+    a, trig, *_ = run_assistant(flow=flow, wake_reply=True, style=Style(choose=first_choice), speech_probe=probe)
+    trig.fire.set()
+    assert wait_for(lambda: flow.seen == ["open notepad"])
+    assert probe.checked and a._voice.said[0] == ("Yes, sir?", True, True)
+
+
+def test_wake_reply_setting():
+    assert config.WAKE_REPLY is True
+    assert 0.3 <= config.WAKE_REPLY_DELAY_SECONDS <= 1.5
+
+
 # ---- conversation mode ------------------------------------------------------------------------
 
 NOTEPAD = Result(True, "Opening notepad.", action={"tool": "open_app", "args": {"name": "notepad"}})

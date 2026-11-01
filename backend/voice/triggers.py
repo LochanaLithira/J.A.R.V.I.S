@@ -320,6 +320,13 @@ class Triggers:
         self._above = 0
         self._recent.clear()
 
+    def recent(self, seconds: float = 1.6) -> list:
+        """The last few seconds of sound (memory only). Used when you say the wake word and your
+        command in one breath: the wake detector needs a moment to be sure, and words spoken in
+        that moment would otherwise be lost."""
+        count = max(0, min(len(self._recent), int(round(seconds * SAMPLE_RATE / CHUNK))))
+        return list(self._recent)[-count:] if count else []
+
     def set_muted(self, muted: bool) -> None:
         """Call with True while J.A.R.V.I.S is speaking, and False when it stops."""
         self._muted = muted
@@ -331,8 +338,7 @@ class Triggers:
         clapped = self._clap.feed(chunk) if self._clap is not None else False
         self.last_score = score
         self._above = self._above + 1 if score > self._threshold else 0
-        if self._voice_check is not None:
-            self._recent.append(chunk)
+        self._recent.append(chunk)              # the last ~2 s, in memory only
 
         now = self._clock()
         if self._muted or now < self._muted_until:
