@@ -304,6 +304,15 @@ def test_a_broken_check_never_makes_it_deaf():
     assert Triggers(FakeWake([0.4]), threshold=0.25, voice_check=boom).process(CH) is not None
 
 
+def test_recent_sound_is_available_for_one_breath_commands():
+    t = Triggers(FakeWake([0.0] * 30))
+    for i in range(30):
+        t.process(np.full(CHUNK, i, np.int16))
+    recent = t.recent(1.6)
+    assert len(recent) == 20 and int(recent[0][0]) == 10 and int(recent[-1][0]) == 29
+    assert len(t.recent(10)) == Triggers.RECENT_CHUNKS and t.recent(0) == []
+
+
 def test_only_about_two_seconds_are_kept_and_reset_clears_them():
     t = Triggers(FakeWake([0.0] * 40), voice_check=lambda chunks: True)
     for _ in range(40):

@@ -86,13 +86,15 @@ class VoiceCheck:
                  speech_prob: float = 0.5):
         self._vad, self.min_speech, self.speech_prob = vad, min_speech_seconds, speech_prob
 
-    def speech_seconds(self, chunks: Iterable[np.ndarray]) -> float:
+    def speech_seconds(self, chunks: Iterable[np.ndarray], prob: float | None = None) -> float:
+        chunks = list(chunks)
         audio = np.concatenate([np.asarray(c, dtype=np.int16) for c in chunks]) if chunks else np.zeros(0, np.int16)
         if hasattr(self._vad, "reset"):
             self._vad.reset()
+        needed = self.speech_prob if prob is None else prob
         frames = 0
         for i in range(0, len(audio) - VAD_FRAME + 1, VAD_FRAME):
-            if self._vad(audio[i:i + VAD_FRAME]) >= self.speech_prob:
+            if self._vad(audio[i:i + VAD_FRAME]) >= needed:
                 frames += 1
         return frames * VAD_FRAME / SAMPLE_RATE
 

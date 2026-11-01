@@ -233,6 +233,28 @@ class FishSpeaker:
             self.last_error = "Fish Audio did not send playable audio."
         return audio
 
+    def prefetch(self, texts: list[str]) -> int:
+        """Fetch fixed lines (like "Yes, sir?") ahead of time into the memory cache, so they play
+        instantly later. Never stored on disk. Returns how many are ready."""
+        ready = 0
+        for text in texts:
+            cleaned = clean_for_speech(text)
+            if not cleaned:
+                continue
+            with self._lock:
+                if cleaned in self._cache:
+                    ready += 1
+                    continue
+            audio = self._fetch(cleaned)
+            if audio is None:
+                continue
+            with self._lock:
+                self._cache[cleaned] = audio
+                while len(self._cache) > CACHE_REPLIES:
+                    self._cache.popitem(last=False)
+            ready += 1
+        return ready
+
     # ---- speaking ------------------------------------------------------------
     def stop(self) -> None:
         """Cut off any speech in progress, and drop any reply that is still being fetched."""
@@ -320,6 +342,15 @@ class Voice:
             self._thread.start()
             return True
         return work()
+
+    def prefetch(self, texts: list[str]) -> int:
+        """Prepare fixed lines in advance (memory only). Does nothing if voice is off."""
+        if self._speaker is None or not hasattr(self._speaker, "prefetch"):
+            return 0
+        try:
+            return self._speaker.prefetch(texts)
+        except Exception:
+            return 0
 
     def finish(self, timeout: float = 30.0) -> None:
         """Let the last reply finish speaking before the program closes."""

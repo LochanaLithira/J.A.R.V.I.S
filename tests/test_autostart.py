@@ -9,8 +9,12 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "install_autostart.ps1"
 
-pytestmark = pytest.mark.skipif(sys.platform != "win32" or shutil.which("powershell") is None,
-                                reason="needs Windows PowerShell")
+pytestmark = [
+    pytest.mark.skipif(sys.platform != "win32" or shutil.which("powershell") is None,
+                       reason="needs Windows PowerShell"),
+    pytest.mark.skipif(not (ROOT / ".venv" / "Scripts" / "pythonw.exe").is_file(),
+                       reason="needs this project's .venv (the script refuses to point at a missing Python)"),
+]
 
 
 def run(startup, *flags):
