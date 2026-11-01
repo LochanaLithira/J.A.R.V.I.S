@@ -100,6 +100,26 @@ def test_reply_cache_is_bounded(monkeypatch):
     assert list(s._cache) == ["two", "three"]
 
 
+def test_wake_replies_can_be_prepared_in_advance():
+    calls = []
+
+    def transport(url, headers, payload, timeout):
+        calls.append(payload["text"])
+        return (503, b"") if payload["text"] == "Sir?" else (200, WAV)
+
+    player = Player()
+    s = FishSpeaker(lambda: "fish-key-123456", transport=transport, player=player)
+    assert s.prefetch(["Yes, sir?", "Sir?", "", "Yes, sir?"]) == 2      # one failed, one empty, one repeat
+    assert calls == ["Yes, sir?", "Sir?"] and player.played == []       # prepared, not played
+    assert s.speak("Yes, sir?") and calls == ["Yes, sir?", "Sir?"]      # plays from memory, no new request
+
+
+def test_voice_prefetch_without_a_speaker():
+    from backend.voice.speak import Voice
+
+    assert Voice(None).prefetch(["Yes, sir?"]) == 0
+
+
 def test_failed_fetches_are_not_cached():
     s = FishSpeaker(lambda: "fish-key-123456", transport=lambda *a: (503, b""), player=Player())
     assert not s.speak("hello") and s._cache == {}

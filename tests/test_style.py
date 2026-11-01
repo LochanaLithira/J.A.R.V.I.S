@@ -84,6 +84,13 @@ def test_greeting_follows_the_time_of_day(hour, opening):
     assert line.startswith(opening) and "sir" in line
 
 
+def test_wake_replies():
+    s = Style()
+    assert all("sir" in line.lower() for line in s.acknowledgements())
+    assert s.acknowledge() in s.acknowledgements()
+    assert "Ma'am?" in Style("ma'am").acknowledgements()
+
+
 def test_another_form_of_address():
     s = Style("ma'am", choose=first)
     assert s.dress("Opening notepad.") == "Opening Notepad, ma'am."
