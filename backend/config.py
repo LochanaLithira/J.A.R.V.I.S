@@ -41,6 +41,12 @@ GEMINI_TIMEOUT_SECONDS = 15.0
 USER_ADDRESS = "sir"
 # Say a short greeting ("Good morning, sir. All systems are online.") when it starts.
 GREETING_ON_START = True
+# Answer out loud when you say "hey jarvis" ("Yes, sir?"), then listen. False = only the chime.
+# The replies are prepared once at startup (in memory), so they play straight away.
+WAKE_REPLY = True
+# Before answering, wait this long. If you carry straight on ("hey jarvis, open notepad") it stays
+# quiet and takes the whole sentence; if you pause, it says "Yes, sir?".
+WAKE_REPLY_DELAY_SECONDS = 0.7
 
 # Fish Audio voice. Leave empty for the default voice, or paste a voice ID (32 lowercase hex
 # characters) from fish.audio: open a voice and copy its model ID.
