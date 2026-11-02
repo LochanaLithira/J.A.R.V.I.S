@@ -9,8 +9,8 @@ import pytest
 from backend.gate.audit import AuditLog
 from backend.gate.gate import Gate
 from backend.gate.models import Param, Risk, Tool
-from backend.ui import confirm
-from backend.ui.confirm import ask_user, describe_action, popup_confirm
+from frontend import confirm
+from frontend.confirm import ask_user, describe_action, popup_confirm
 
 TOKEN = "0123456789abcdef0123456789abcdef"
 
