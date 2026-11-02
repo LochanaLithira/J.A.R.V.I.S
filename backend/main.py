@@ -845,8 +845,8 @@ def _message_box(text: str) -> None:
 
 def main() -> int:
     from .registry import build_gate
-    from .ui.confirm import popup_confirm, show_message
-    from .ui.tray import Tray
+    from frontend.confirm import popup_confirm, show_message
+    from frontend.tray import Tray
 
     setup_logging()
     instance = acquire_single_instance()
@@ -862,7 +862,7 @@ def main() -> int:
     get_flow = make_flow_getter(gate, make_brain_getter())
     threading.Thread(target=_prepare, args=(get_flow,), name="jarvis-prepare", daemon=True).start()
 
-    from .ui.window import ScreenLink
+    from frontend.window import ScreenLink
 
     holder: dict[str, Assistant] = {}
 

@@ -239,7 +239,7 @@ Tests never touch your real Documents or Downloads, and never change your real S
 
 ```text
 .
-├── backend/
+├── backend/              # The logic: no windows or icons
 │   ├── brain.py          # Gemini integration and strict response parsing
 │   ├── cli.py            # Interactive development console
 │   ├── config.py         # Local settings and safety limits
@@ -249,8 +249,12 @@ Tests never touch your real Documents or Downloads, and never change your real S
 │   ├── main.py           # Background app: listening loop, watchdog, startup
 │   ├── registry.py       # Explicit approved-tool registry
 │   ├── tools/            # Notes, application, file and timer tools
-│   ├── ui/               # Confirmation popup, tray icon, screen window and its page
-│   └── voice/             # Wake word, microphone, speech input, and speech output
+│   └── voice/            # Wake word, microphone, speech input, and speech output
+├── frontend/             # Everything you see (imports nothing from backend)
+│   ├── confirm.py        # Keypress confirmation and private-reply popups
+│   ├── tray.py           # Tray icon by the clock
+│   ├── window.py         # The on-demand screen's window process
+│   └── screen/           # The screen itself: HTML, CSS and JavaScript
 ├── scripts/               # Setup utilities (autostart)
 ├── tests/                 # Automated tests
 ├── requirements.in        # Runtime dependency inputs
