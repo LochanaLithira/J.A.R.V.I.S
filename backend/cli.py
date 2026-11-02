@@ -19,7 +19,7 @@ from .main import (TIMER_DONE_LINE, Status, build_assistant, describe_heard, mak
                    make_speech, make_voice)
 from .registry import build_gate
 from .tools.timers import TimerService
-from .ui.confirm import popup_confirm
+from frontend.confirm import popup_confirm
 from .voice.listen import Heard
 from .voice.speak import Voice
 from .voice.style import Style

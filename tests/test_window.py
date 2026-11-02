@@ -9,8 +9,8 @@ import pytest
 
 from backend import main
 from backend.main import Status, screen_feed, sound_level
-from backend.ui import tray, window
-from backend.ui.window import ScreenLink, pump, to_js
+from frontend import tray, window
+from frontend.window import ScreenLink, pump, to_js
 
 import numpy as np
 

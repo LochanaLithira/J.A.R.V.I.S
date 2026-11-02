@@ -14,7 +14,7 @@ How it stays safe:
 Honest limit: any program running as you can synthesize key presses. This protects against
 the AI, prompt injection and misheard speech, not against malware already running as you.
 
-Try it:  python -m backend.ui.confirm --demo
+Try it:  python -m frontend.confirm --demo
 """
 from __future__ import annotations
 
@@ -36,7 +36,7 @@ MAX_ARGS_SHOWN = 8
 MAX_REQUEST_CHARS = 10_000
 
 _TOKEN_RE = re.compile(r"[0-9a-f]{32}")
-_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 # ---------------------------------------------------------------------------
@@ -206,7 +206,7 @@ Runner = Callable[[str, float], "tuple[int, str]"]
 
 def _run_window_process(payload: str, timeout: float) -> tuple[int, str]:
     done = subprocess.run(
-        [sys.executable, "-m", "backend.ui.confirm", "--window"],
+        [sys.executable, "-m", "frontend.confirm", "--window"],
         input=payload, capture_output=True, text=True, timeout=timeout + 5, cwd=_PROJECT_ROOT,
     )
     return done.returncode, done.stdout
@@ -292,7 +292,7 @@ def show_message(text: Any, launcher: Callable[..., Any] | None = None,
         if launcher is not None:
             launcher(payload)
             return True
-        proc = subprocess.Popen([sys.executable, "-m", "backend.ui.confirm", "--message"], stdin=subprocess.PIPE,
+        proc = subprocess.Popen([sys.executable, "-m", "frontend.confirm", "--message"], stdin=subprocess.PIPE,
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, text=True, cwd=_PROJECT_ROOT)
         proc.stdin.write(payload)
         proc.stdin.close()
@@ -319,7 +319,7 @@ def main(argv: list[str] | None = None) -> int:
         allowed = popup_confirm("demo_delete_file", {"name": "report", "note": "line one\nline two (only a demo)"})
         print("ALLOWED" if allowed else "DENIED")
         return 0
-    print("usage: python -m backend.ui.confirm --demo")
+    print("usage: python -m frontend.confirm --demo")
     return 2
 
 

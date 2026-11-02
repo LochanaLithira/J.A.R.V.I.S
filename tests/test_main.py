@@ -13,7 +13,7 @@ from backend import config, main
 from backend.brain import BrainError
 from backend.gate.models import Result
 from backend.main import Assistant, Status, startup_checks
-from backend.ui import confirm, tray
+from frontend import confirm, tray
 from backend.voice.listen import Heard
 from backend.voice.triggers import CHUNK, Microphone, TriggerError, WakeEvent
 
