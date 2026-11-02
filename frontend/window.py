@@ -12,7 +12,7 @@ How it stays safe:
 - window -> J.A.R.V.I.S: exactly one possible command, "toggle_pause". The window cannot run tools.
 - Private mode (nothing stored), no downloads, no right-click menu, no developer tools.
 
-    python -m backend.ui.window      (started by the app; reads updates on stdin)
+    python -m frontend.window      (started by the app; reads updates on stdin)
 """
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, TextIO
 
 PAGE = Path(__file__).resolve().parent / "screen" / "index.html"
-_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 # The only screen calls J.A.R.V.I.S may make, with how many arguments each takes.
 ALLOWED_CALLS = {"setState": 2, "setLevel": 1, "addMessage": 3, "setTimers": 1, "addActivity": 1, "setSystems": 1}
@@ -134,7 +134,7 @@ def run_window() -> int:
 
 def _launch() -> Any:
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    return subprocess.Popen([sys.executable, "-m", "backend.ui.window"], stdin=subprocess.PIPE,
+    return subprocess.Popen([sys.executable, "-m", "frontend.window"], stdin=subprocess.PIPE,
                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, encoding="utf-8",
                             bufsize=1, cwd=_PROJECT_ROOT, creationflags=flags)
 
