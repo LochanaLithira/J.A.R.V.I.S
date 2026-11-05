@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import sys
 import time
-from typing import Callable
+from typing import Any, Callable
 
 import numpy as np
 
@@ -92,10 +92,12 @@ def teach(listen_once: Callable[[], list | None], model: SpeakerModel,
 # The real microphone
 # ---------------------------------------------------------------------------
 
-def _wake_listener(mic, triggers, chime: Callable[[], None] | None = None) -> Callable[[], list | None]:
+def _wake_listener(mic, triggers, chime: Callable[[], None] | None = None, stop=None,
+                   on_level: Callable[[Any], None] | None = None) -> Callable[[], list | None]:
     """Listen for one "hey jarvis". After a reset the wake-word detector needs ~1.5 s of sound
     before it can recognise anything, so it listens for WARM_UP_CHUNKS first and only then chimes.
-    Counted in slices, not seconds, so it behaves the same however fast the sound arrives."""
+    Counted in slices, not seconds, so it behaves the same however fast the sound arrives.
+    `stop` (a threading.Event) ends it at once; `on_level` gets each slice for a sound meter."""
     if chime is None:
         from .triggers import play_chime as chime
 
@@ -103,7 +105,9 @@ def _wake_listener(mic, triggers, chime: Callable[[], None] | None = None) -> Ca
         mic.drain()
         triggers.reset()
         heard = 0
-        for chunk in mic.chunks():
+        for chunk in mic.chunks(stop):
+            if on_level is not None:
+                on_level(chunk)
             heard += 1
             if heard <= WARM_UP_CHUNKS:
                 triggers.process(chunk)                      # getting ready: nothing counts yet
@@ -119,6 +123,35 @@ def _wake_listener(mic, triggers, chime: Callable[[], None] | None = None) -> Ca
         return None
 
     return listen_once
+
+
+def screen_prepare(on_level: Callable[[Any], None] | None = None) -> Callable[[], tuple[Callable, Callable]]:
+    """For teaching from the screen: loads the model (downloading it once if needed) and returns
+    (embed, listen). listen(stop, on_ready) opens the microphone for one sample only."""
+
+    def prepare() -> tuple[Callable, Callable]:
+        from .listen import SileroVAD, VoiceCheck
+        from .triggers import Microphone, Triggers, WakeWordDetector, pick_microphone, play_chime
+
+        download_speaker_model(config.MODELS_DIR)
+        model = SpeakerModel(config.MODELS_DIR)
+        voiced = VoiceCheck(SileroVAD(config.MODELS_DIR), config.WAKE_MIN_SPEECH_SECONDS,
+                            config.WAKE_SPEECH_CONFIDENCE)
+        triggers = Triggers(WakeWordDetector(config.MODELS_DIR), None, config.WAKE_THRESHOLD,
+                            config.WAKE_PATIENCE, cooldown_seconds=0.5, voice_check=voiced)
+        device = pick_microphone(config.MIC_DEVICE)
+
+        def listen(stop, on_ready: Callable[[], None]) -> list | None:
+            def chime() -> None:
+                play_chime()
+                on_ready()
+
+            with Microphone(device) as mic:
+                return _wake_listener(mic, triggers, chime=chime, stop=stop, on_level=on_level)()
+
+        return model.embed, listen
+
+    return prepare
 
 
 def _open_listening():

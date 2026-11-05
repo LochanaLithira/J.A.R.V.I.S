@@ -7,6 +7,8 @@
  *   HUD.setTimers([{label, remaining, total}])
  *   HUD.addActivity({time, text, kind})   kind: ok | warn | bad
  *   HUD.setSystems([{name, ok}])
+ *   HUD.setVoice({taught, created, samples, bar, on, strict, problem, message})   the Settings page's Voice section
+ *   HUD.teach({phase, mode, done, of, tip, message, outcome, can_redo, ...})       progress while teaching your voice
  * With no app attached (opened as a plain file), a demo plays so the look can be judged.
  */
 (() => {
@@ -429,6 +431,124 @@
     next();
   }
 
+  // ---- settings: your voice ----------------------------------------------------------------------
+  // The page only presses buttons (bare names, no data). The app answers with setVoice and teach.
+  const BUTTONS = ["teach_start", "teach_record", "teach_redo", "teach_cancel", "voice_test", "voice_forget", "voice_status"];
+  let demoPress = null;                    // stands in for the app in demo mode
+  function press(name) {
+    if (!BUTTONS.includes(name)) return;
+    const api = attached && window.pywebview && window.pywebview.api;
+    if (api && typeof api[name] === "function") api[name]();
+    else if (!attached && demoPress) demoPress(name);
+  }
+
+  let teaching = false, voiceTaught = false;
+  const PHASE_WORDS = {
+    preparing: "Getting ready...", waiting: "Press Record when you're ready", getting_ready: "Getting ready...",
+    say_it: "Say \"hey jarvis\" now", comparing: "Comparing with other voices...",
+    result: "Finished", cancelled: "Cancelled", failed: "Something went wrong",
+  };
+
+  function openSettings() {
+    $("settings").hidden = false;
+    press("voice_status");
+    $("settings-close").focus();
+  }
+  function closeSettings() {
+    if (teaching) press("teach_cancel");     // closing the window never leaves a session running
+    $("settings").hidden = true;
+  }
+
+  function setVoice(s) {
+    s = s || {};
+    voiceTaught = !!s.taught;
+    let text;
+    if (s.problem) text = String(s.problem);
+    else if (s.taught) {
+      text = `Taught on ${String(s.created || "?")} from ${Number(s.samples) || 0} samples. ` +
+        `Bar ${Number(s.bar || 0).toFixed(2)}. Voice check ${s.on ? "ON" : "OFF"}${s.strict ? " (strict)" : ""}.`;
+    } else text = "Not taught yet: J.A.R.V.I.S answers any voice.";
+    $("voice-status").textContent = text;
+    $("voice-status").className = "setting-status " + (s.problem ? "bad" : s.on ? "ok" : "warn");
+    $("voice-message").textContent = s.message ? String(s.message) : "";
+    $("voice-teach").textContent = s.taught ? "Teach again" : "Teach my voice";
+    $("voice-test").disabled = !s.taught || teaching;
+    $("voice-forget").disabled = !s.taught || teaching;
+    $("voice-teach").disabled = teaching;
+  }
+
+  function placeOnScale(el, from, to) {
+    const a = clamp(Number(from) || 0), b = clamp(Number(to) || 0);
+    el.style.left = `${a * 100}%`;
+    el.style.width = `${Math.max(0.6, (b - a) * 100)}%`;
+  }
+
+  function teach(u) {
+    u = u || {};
+    const phase = String(u.phase || "");
+    const finished = ["result", "cancelled", "failed"].includes(phase);
+    teaching = !finished;
+    $("teach").hidden = false;
+    $("settings").hidden = false;
+    const test = u.mode === "test";
+    const done = Number(u.done) || 0, of = Number(u.of) || 20;
+    const taking = ["waiting", "getting_ready", "say_it"].includes(phase);      // the sample being taken now
+    const complete = phase === "comparing" || (phase === "result" && u.saved !== undefined);
+    $("teach-count").textContent = test ? "TEST" : complete ? `${of} / ${of}` : `${Math.min(done + (taking ? 1 : 0), of)} / ${of}`;
+    $("teach-dial").style.setProperty("--p", test || complete ? 1 : clamp(done / of));
+    $("teach-phase").textContent = PHASE_WORDS[phase] || "";
+    $("teach-tip").textContent = phase === "waiting" && u.tip && !test ? `Next: say it ${String(u.tip)}` : "";
+    const msg = $("teach-message");
+    msg.textContent = u.message ? String(u.message) : "";
+    msg.className = "teach-message " + (u.outcome === "got_it" || u.recognised || u.saved ? "ok"
+      : ["missed", "odd"].includes(u.outcome) || phase === "failed" || u.recognised === false || u.saved === false ? "warn" : "");
+    $("teach").classList.toggle("listening", phase === "say_it");
+
+    const showScale = phase === "result" && !test && Array.isArray(u.yours);
+    $("teach-result").hidden = !showScale && !(test && u.score !== undefined);
+    if (showScale) {
+      placeOnScale($("scale-yours"), u.yours[0], u.yours[1]);
+      placeOnScale($("scale-others"), 0, u.others);
+      $("scale-bar").hidden = u.bar === null || u.bar === undefined;
+      if (u.bar !== null && u.bar !== undefined) placeOnScale($("scale-bar"), u.bar, u.bar);
+    } else if (test && u.score !== undefined) {
+      placeOnScale($("scale-yours"), u.score, u.score);
+      placeOnScale($("scale-others"), 0, 0);
+      placeOnScale($("scale-bar"), u.bar, u.bar);
+      $("scale-bar").hidden = false;
+    }
+
+    $("teach-record").hidden = finished;
+    $("teach-cancel").hidden = finished;
+    $("teach-redo").hidden = finished || test;
+    $("teach-done").hidden = !finished;
+    $("teach-record").disabled = phase !== "waiting";
+    $("teach-redo").disabled = !(phase === "waiting" && u.can_redo);
+    $("teach-record").textContent = test ? "Say it" : "Record";
+    $("voice-section").classList.toggle("muted", teaching);
+    ["voice-teach", "voice-test", "voice-forget"].forEach((id) => { $(id).disabled = teaching || (id !== "voice-teach" && !voiceTaught); });
+    if (finished) $("teach-done").focus();
+    else if (phase === "waiting") $("teach-record").focus();
+  }
+
+  function finishTeaching() {
+    $("teach").hidden = true;
+    $("voice-section").classList.remove("muted");
+    teaching = false;
+    press("voice_status");
+  }
+
+  $("settings-btn").addEventListener("click", openSettings);
+  $("settings-close").addEventListener("click", closeSettings);
+  $("settings").addEventListener("keydown", (e) => { if (e.key === "Escape") closeSettings(); });
+  $("voice-teach").addEventListener("click", () => press("teach_start"));
+  $("voice-test").addEventListener("click", () => press("voice_test"));
+  $("voice-forget").addEventListener("click", () => press("voice_forget"));
+  $("teach-record").addEventListener("click", () => press("teach_record"));
+  $("teach-redo").addEventListener("click", () => press("teach_redo"));
+  $("teach-cancel").addEventListener("click", () => press("teach_cancel"));
+  $("teach-done").addEventListener("click", finishTeaching);
+
   // ---- the app's handle --------------------------------------------------------------------------
   const pauseHandlers = [];
   $("pause-btn").addEventListener("click", () => pauseHandlers.forEach((fn) => fn()));
@@ -444,7 +564,7 @@
     });
   }
 
-  window.HUD = { setState, setLevel, addMessage, setTimers, addActivity, setSystems, attach,
+  window.HUD = { setState, setLevel, addMessage, setTimers, addActivity, setSystems, teach, setVoice, attach,
     onPause: (fn) => pauseHandlers.push(fn) };
 
   window.addEventListener("resize", resize);
@@ -515,6 +635,43 @@
         play();
       }
     });
+    // Settings in demo mode: pretend teaching, so the look can be judged (nothing is listened to).
+    let demoDone = 0, demoTaught = false;
+    const tips = ["normally", "a little quieter", "a little louder", "a bit faster", "from a bit further away"];
+    const waitAt = (message, outcome) => teach({ phase: "waiting", mode: "teach", done: demoDone, of: 20,
+      tip: tips[Math.floor(demoDone / 4) % tips.length], message, outcome, can_redo: demoDone > 0 });
+    demoPress = (name) => {
+      if (name === "voice_status") {
+        setVoice(demoTaught ? { taught: true, created: "2026-11-05 16:40", samples: 20, bar: 0.42, on: true } : { taught: false });
+      } else if (name === "teach_start") {
+        demoDone = 0;
+        teach({ phase: "preparing", mode: "teach", done: 0, of: 20, message: "Getting ready..." });
+        setTimeout(() => waitAt("Press Record, then say \"hey jarvis\" after the chime."), 700);
+      } else if (name === "teach_record") {
+        teach({ phase: "getting_ready", mode: "teach", done: demoDone, of: 20, message: "Getting ready..." });
+        setTimeout(() => teach({ phase: "say_it", mode: "teach", done: demoDone, of: 20, message: "Say \"hey jarvis\" now." }), 900);
+        setTimeout(() => {
+          demoDone++;
+          if (demoDone < 20) { waitAt("Got it.", "got_it"); return; }
+          teach({ phase: "comparing", mode: "teach", done: 20, of: 20, message: "Comparing your voice with other voices..." });
+          setTimeout(() => {
+            demoTaught = true;
+            teach({ phase: "result", mode: "teach", done: 0, of: 20, saved: true, yours: [0.58, 0.81], others: 0.21, bar: 0.38,
+              message: "Your voice scored 0.58-0.81, other voices at most 0.21. The bar is 0.38." });
+          }, 1200);
+        }, 2200);
+      } else if (name === "teach_redo") {
+        demoDone = Math.max(0, demoDone - 1);
+        waitAt("Took that one off. Record it again.");
+      } else if (name === "teach_cancel") {
+        teach({ phase: "cancelled", mode: "teach", message: "Cancelled. Nothing was saved." });
+      } else if (name === "voice_test") {
+        teach({ phase: "result", mode: "test", score: 0.66, bar: 0.38, recognised: true, message: "That's you." });
+      } else if (name === "voice_forget") {
+        demoTaught = false;
+        setVoice({ taught: false, message: "Your voiceprint was deleted." });
+      }
+    };
     addMessage("system", "Demo mode: this is how the screen will look with J.A.R.V.I.S attached.");
     play();
     return () => { paused = true; timersRunning.forEach(clearTimeout); timersRunning = []; };

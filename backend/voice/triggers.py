@@ -329,6 +329,10 @@ class Triggers:
         count = max(0, min(len(self._recent), int(round(seconds * SAMPLE_RATE / CHUNK))))
         return list(self._recent)[-count:] if count else []
 
+    def set_voice_check(self, check: Callable[[list], bool] | None) -> None:
+        """Replace the wake-up check (used when your voice check is switched on or off)."""
+        self._voice_check = check
+
     def set_muted(self, muted: bool) -> None:
         """Call with True while J.A.R.V.I.S is speaking, and False when it stops."""
         self._muted = muted

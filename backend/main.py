@@ -261,7 +261,7 @@ class Assistant:
         self._device, self._mic_factory, self._chime = device, mic_factory, chime
         self._show_text, self._on_status, self._on_notice, self._out = show_text, on_status, on_notice, out
         self._retry, self._mic_idle = retry_seconds, mic_idle_seconds
-        self._paused = self._locked = self._asleep = False
+        self._paused = self._locked = self._asleep = self._teaching = False
         self._stop = threading.Event()
         self._interrupt = threading.Event()   # set whenever the microphone must be let go at once
         self._thread: threading.Thread | None = None
@@ -293,6 +293,19 @@ class Assistant:
     def set_asleep(self, asleep: bool) -> None:
         """The laptop is going to sleep (True) or has woken up (False). Waking also reopens the mic."""
         self._change("_asleep", asleep)
+
+    def set_teaching(self, teaching: bool) -> None:
+        """You are teaching J.A.R.V.I.S your voice (True): it lets go of the microphone so it
+        doesn't answer each "hey jarvis", and takes it back when you finish (False)."""
+        self._change("_teaching", teaching)
+
+    @property
+    def voice_check(self) -> Any:
+        return getattr(self._triggers, "_voice_check", None)
+
+    def set_voice_check(self, check: Any) -> None:
+        """Swap the wake-up checks (e.g. your voice check just switched on), without a restart."""
+        self._triggers.set_voice_check(check)
 
     def announce(self, label: str) -> None:
         """A timer finished (called from the timer thread). Handled by the loop within ~0.1 s."""
@@ -339,7 +352,7 @@ class Assistant:
                 mic.drain()
 
     def listening_allowed(self) -> bool:
-        return not (self._paused or self._locked or self._asleep or self._stop.is_set())
+        return not (self._paused or self._locked or self._asleep or self._teaching or self._stop.is_set())
 
     def start(self) -> None:
         self._thread = threading.Thread(target=self.run, name="jarvis-listen", daemon=True)
@@ -417,7 +430,7 @@ class Assistant:
         self._set_status(Status.STOPPED)
 
     def _idle_status(self) -> Status:
-        if self._paused:
+        if self._paused or self._teaching:
             return Status.PAUSED
         if self._locked:
             return Status.LOCKED
@@ -689,6 +702,31 @@ def make_speaker_check(get: Callable[[str], str | None] = get_secret,
     return None, problem + " Until it is fixed, J.A.R.V.I.S answers any voice."
 
 
+def make_voice_settings(get_assistant: Callable[[], Any], screen: Any, confirm: Callable[[str, dict], bool]) -> Any:
+    """The Settings page's voice buttons, wired to the real microphone, model and Credential Manager.
+    A quiet thread cancels a teaching session that was left alone."""
+    from .credentials import delete_secret, set_secret
+    from .settings import VoiceSettings
+    from .voice.enroll import screen_prepare
+    from .voice.other_voices import other_voices
+    from .voice.teaching import TeachingSession
+
+    def make_session(save, pause_listening, on_update, current):
+        return TeachingSession(screen_prepare(on_level=lambda chunk: screen.set_level(sound_level(chunk))),
+                               other_voices, save, pause_listening, on_update, current=current)
+
+    settings = VoiceSettings(get_assistant, screen.teach, screen.set_voice, confirm, get_secret, set_secret,
+                             delete_secret, make_session, model_factory=SpeakerModel)
+
+    def watch() -> None:
+        while True:
+            time.sleep(10)
+            settings.check_idle()
+
+    threading.Thread(target=watch, name="jarvis-settings-idle", daemon=True).start()
+    return settings
+
+
 def build_assistant(audit: Any, get_flow: Callable[[], Flow] | None, voice: Voice | None, *,
                     out: Callable[[str], None] | None = None, show_text: Callable[[str], Any] | None = None,
                     on_status: Callable[[Status, str], None] | None = None,
@@ -918,8 +956,16 @@ def main() -> int:
                 {"name": "Fish Audio", "ok": keys.get("fish_api_key", False)},
                 {"name": "Audit chain intact", "ok": gate.audit.verify()[0]}]
 
-    screen = ScreenLink(on_command=lambda cmd: toggle_pause() if cmd == "toggle_pause" else None,
-                        get_systems=systems, get_timers=timers.snapshot)
+    settings_box: dict[str, Any] = {}
+
+    def on_command(cmd: str) -> None:
+        if cmd == "toggle_pause":
+            toggle_pause()
+        elif "s" in settings_box:
+            settings_box["s"].handle(cmd)
+
+    screen = ScreenLink(on_command=on_command, get_systems=systems, get_timers=timers.snapshot)
+    settings_box["s"] = make_voice_settings(lambda: holder.get("a"), screen, popup_confirm)
     feed_status, feed_event = screen_feed(screen)
     tray = Tray(on_toggle_pause=toggle_pause,
                 is_paused=lambda: holder["a"].paused if "a" in holder else False,

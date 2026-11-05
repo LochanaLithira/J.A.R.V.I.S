@@ -106,13 +106,15 @@ A changed or corrupted model is refused instead of being loaded.
 
 ## Teach J.A.R.V.I.S your voice (optional)
 
-Once taught, J.A.R.V.I.S only answers "hey jarvis" when it sounds like you, so a TV, a video or a visitor can't wake it. First pause J.A.R.V.I.S from its tray icon, then run:
+Once taught, J.A.R.V.I.S only answers "hey jarvis" when it sounds like you, so a TV, a video or a visitor can't wake it.
+
+Open the J.A.R.V.I.S screen from the tray icon, press **Settings**, then **Teach my voice**. Press **Record**, wait for the chime and say "hey jarvis"; repeat for 20 samples at your own pace (**Redo last** retakes one, **Cancel** throws everything away). Listening pauses while you teach and comes back on its own. Each sample is turned into voice numbers straight away and its sound is dropped; only the averaged numbers and a bar are saved, in `%LOCALAPPDATA%\jarvis\voiceprint.json`. It never leaves your laptop, and the check switches on at once. **Test** shows your score; **Forget my voice** deletes it (after a Y keypress).
+
+The same from a terminal (pause J.A.R.V.I.S first):
 
 ```powershell
 python -m backend.voice.enroll teach
 ```
-
-Say "hey jarvis" 20 times after each chime (about 2 minutes). Each one is turned into voice numbers straight away and its sound is dropped; only the averaged numbers and a bar are saved, in `%LOCALAPPDATA%\jarvis\voiceprint.json`. It never leaves your laptop. Then resume listening.
 
 ```powershell
 python -m backend.voice.enroll test      # say "hey jarvis" and see your score
