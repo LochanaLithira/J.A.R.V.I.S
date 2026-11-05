@@ -6,3 +6,4 @@ onnxruntime
 numpy
 sounddevice
 pywebview
+comtypes
