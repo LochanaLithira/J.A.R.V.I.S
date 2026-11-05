@@ -75,6 +75,15 @@ WAKE_SPEECH_CHECK = True
 WAKE_SPEECH_CONFIDENCE = 0.7     # how sure the local voice detector must be, per 32 ms frame
 WAKE_MIN_SPEECH_SECONDS = 0.4    # at least this much voice in the last ~2 seconds
 
+# Your voice check: once you have taught J.A.R.V.I.S your voice, "hey jarvis" only counts when it
+# sounds like you. Teach it with:  python -m backend.voice.enroll teach
+# The voiceprint holds numbers only (never audio) and stays on this laptop.
+VOICE_CHECK = True               # use your voiceprint when there is one
+VOICEPRINT = _base / "jarvis" / "voiceprint.json"
+# If the voice check can't run (model missing, voiceprint changed): False = carry on with the wake
+# word alone and show a warning; True = ignore every "hey jarvis" until it is fixed.
+VOICE_CHECK_STRICT = False
+
 # Double clap. OFF by default: knocks, desk taps and doors look like claps to a laptop mic (13 of
 # 17 clap wake-ups in 4 days were false). CLAP_MIN_LEVEL is how loud a clap must be; your claps
 # measured 815-1993 on the built-in mic. The listen command prints each clap's level for tuning.

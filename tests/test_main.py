@@ -876,7 +876,7 @@ def test_build_assistant_from_config(monkeypatch, audit):
     monkeypatch.setattr(config, "CLAP_ENABLED", True)
     a = main.build_assistant(audit, None, None)
     assert a._device == 7 and a._triggers._clap == ("clap", None)
-    assert a._triggers._voice_check == ("voice check", "vad", config.WAKE_MIN_SPEECH_SECONDS)
+    assert a._triggers._voice_check._checks == [("no voice", ("voice check", "vad", config.WAKE_MIN_SPEECH_SECONDS))]
     assert a._speech == ("speech", main.play_done_chime) and a._warm is main.warm_all
     lines = []
     b = main.build_assistant(audit, None, None, out=lines.append)

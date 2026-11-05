@@ -49,6 +49,8 @@ from .voice.style import Style
 from .voice.triggers import (ALARM_CHIME, CHUNK, SAMPLE_RATE, ClapDetector, Microphone, TriggerError, Triggers,
                              WakeEvent, WakeWordDetector, pick_microphone, play_chime, play_close_chime,
                              play_done_chime)
+from .voice.voiceprint import (AllChecks, SpeakerCheck, SpeakerModel, StrictCheck, VoiceprintError,
+                               load_voiceprint)
 
 log = logging.getLogger("jarvis")
 
@@ -663,6 +665,30 @@ class Assistant:
         return t1 - t0, time.monotonic() - t1, result
 
 
+def make_speaker_check(get: Callable[[str], str | None] = get_secret,
+                       model_factory: Callable[[Any], Any] = SpeakerModel) -> tuple[Callable | None, str]:
+    """Your voice check, if you have taught J.A.R.V.I.S your voice: (check or None, problem text).
+
+    A changed voiceprint or a missing model is never ignored silently: the problem is reported,
+    and VOICE_CHECK_STRICT decides whether "hey jarvis" carries on without the check or is refused."""
+    if not config.VOICE_CHECK:
+        return None, ""
+    try:
+        voiceprint = load_voiceprint(config.VOICEPRINT, get)
+        if voiceprint is None:
+            return None, ""                          # not taught yet: nothing to check
+        check = SpeakerCheck(model_factory(config.MODELS_DIR), voiceprint)
+        return (StrictCheck(check) if config.VOICE_CHECK_STRICT else check), ""
+    except VoiceprintError as exc:
+        problem = str(exc)
+    except Exception as exc:
+        log.error("voice check failed to start: %s", type(exc).__name__)
+        problem = "The voice check couldn't start."
+    if config.VOICE_CHECK_STRICT:
+        return StrictCheck(None), problem + " Until it is fixed, every \"hey jarvis\" is ignored."
+    return None, problem + " Until it is fixed, J.A.R.V.I.S answers any voice."
+
+
 def build_assistant(audit: Any, get_flow: Callable[[], Flow] | None, voice: Voice | None, *,
                     out: Callable[[str], None] | None = None, show_text: Callable[[str], Any] | None = None,
                     on_status: Callable[[Status, str], None] | None = None,
@@ -679,8 +705,13 @@ def build_assistant(audit: Any, get_flow: Callable[[], Flow] | None, voice: Voic
         clap = ClapDetector(config.CLAP_MIN_LEVEL, on_clap=on_clap)
     voice_check = (VoiceCheck(SileroVAD(config.MODELS_DIR), config.WAKE_MIN_SPEECH_SECONDS,
                               config.WAKE_SPEECH_CONFIDENCE) if config.WAKE_SPEECH_CHECK else None)
+    speaker, problem = make_speaker_check()
+    if problem and on_notice is not None:
+        on_notice(problem)
+    checks = [(name, c) for name, c in (("no voice", voice_check), ("not your voice", speaker)) if c is not None]
     triggers = Triggers(wake, clap, config.WAKE_THRESHOLD, config.WAKE_PATIENCE,
-                        config.WAKE_COOLDOWN_SECONDS, audit=audit, voice_check=voice_check)
+                        config.WAKE_COOLDOWN_SECONDS, audit=audit,
+                        voice_check=AllChecks(checks) if checks else None)
     return Assistant(triggers, make_speech(audit, on_recorded=play_done_chime), get_flow, voice,
                      pick_microphone(config.MIC_DEVICE), show_text=show_text, on_status=on_status,
                      on_notice=on_notice, out=out, warm=warm_all,
@@ -870,11 +901,18 @@ def main() -> int:
         if "a" in holder:
             holder["a"].toggle_pause()
 
+    def voice_check_state() -> str:
+        a = holder.get("a")
+        check = getattr(getattr(a, "_triggers", None), "_voice_check", None)
+        names = [name for name, _ in getattr(check, "_checks", [])]
+        return "on" if "not your voice" in names else "off"
+
     def systems() -> list[dict]:
         keys = key_status()
         a = holder.get("a")
         return [{"name": "Microphone", "ok": a is not None and a.status is not Status.PROBLEM},
                 {"name": "Wake word", "ok": a is not None},
+                {"name": "Voice check", "ok": voice_check_state() == "on"},
                 {"name": "Gemini", "ok": keys.get("gemini_api_key", False)},
                 {"name": "Groq", "ok": keys.get("stt_api_key", False)},
                 {"name": "Fish Audio", "ok": keys.get("fish_api_key", False)},

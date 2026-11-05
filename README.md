@@ -104,6 +104,24 @@ python -m backend.voice.triggers status
 
 A changed or corrupted model is refused instead of being loaded.
 
+## Teach J.A.R.V.I.S your voice (optional)
+
+Once taught, J.A.R.V.I.S only answers "hey jarvis" when it sounds like you, so a TV, a video or a visitor can't wake it. First pause J.A.R.V.I.S from its tray icon, then run:
+
+```powershell
+python -m backend.voice.enroll teach
+```
+
+Say "hey jarvis" 20 times after each chime (about 2 minutes). Each one is turned into voice numbers straight away and its sound is dropped; only the averaged numbers and a bar are saved, in `%LOCALAPPDATA%\jarvis\voiceprint.json`. It never leaves your laptop. Then resume listening.
+
+```powershell
+python -m backend.voice.enroll test      # say "hey jarvis" and see your score
+python -m backend.voice.enroll status
+python -m backend.voice.enroll delete    # forget your voiceprint
+```
+
+The first `teach` downloads the voice-check model once (WeSpeaker ResNet34, about 26 MB), checked against a fixed SHA-256 fingerprint. Re-teach it if you change microphone or it often fails to recognise you.
+
 ## Run J.A.R.V.I.S. in the background
 
 This is the everyday way to use it. From the repository root:
@@ -207,6 +225,7 @@ Most local settings are in `backend/config.py`, including:
 - Double-clap detection settings.
 - How it speaks: `USER_ADDRESS` ("sir" by default) and `GREETING_ON_START`.
 - When you have finished speaking: `LISTEN_END_SILENCE_SECONDS` (1.2 s) and `LISTEN_UNFINISHED_EXTRA_SECONDS`.
+- Your voice check: `VOICE_CHECK` (on once taught) and `VOICE_CHECK_STRICT` (off: if the check breaks, it warns and answers any voice; on: it ignores every "hey jarvis" until fixed).
 - Conversation mode: `CONVERSATION_MODE` (on), `CONVERSATION_SECONDS`, `CONVERSATION_MAX_TURNS`, `CONVERSATION_MAX_SECONDS`, `CONVERSATION_MEMORY_TURNS`.
 - Follow-ups when conversation mode is off: `FOLLOW_UP_ON_QUESTION`, `FOLLOW_UP_SECONDS`, `FOLLOW_UP_MAX_TURNS`.
 
@@ -277,6 +296,8 @@ Tests never touch your real Documents or Downloads, and never change your real S
 ## License
 
 J.A.R.V.I.S. is released under the [MIT License](LICENSE).
+
+The optional voice check uses the [WeSpeaker](https://github.com/wenet-e2e/wespeaker) ResNet34 model trained on [VoxCeleb](https://www.robots.ox.ac.uk/~vgg/data/voxceleb/), licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/), as packaged in ONNX form by the [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) project. The model is downloaded separately and is not part of this repository.
 
 ## Security reports
 
