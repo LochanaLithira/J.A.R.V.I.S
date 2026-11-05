@@ -917,9 +917,6 @@ def main() -> int:
         holder["a"].start()
         if config.GREETING_ON_START:
             holder["a"].say_line(Style(config.USER_ADDRESS).greeting())
-        if config.WAKE_REPLY:                # prepare "Yes, sir?" now, so waking answers instantly
-            threading.Thread(target=voice.prefetch, args=(Style(config.USER_ADDRESS).acknowledgements(),),
-                             name="jarvis-prefetch", daemon=True).start()
     try:
         tray.run()                       # the Windows message loop; returns when you choose Quit
     finally:
