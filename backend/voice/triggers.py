@@ -77,20 +77,22 @@ def verify_models(models_dir: Path) -> dict[str, Path]:
     return found
 
 
-def _fetch(url: str) -> bytes:
-    """Download one file over HTTPS, with a timeout and a size cap. GitHub answers release links
-    with a redirect to its file host, so redirects are followed; the fingerprint check that
+def _fetch(url: str, max_bytes: int = MAX_MODEL_BYTES) -> bytes:
+    """Download one file over HTTPS, with a timeout and a size cap. GitHub and Hugging Face answer
+    with a redirect to their file hosts, so redirects are followed; the fingerprint check that
     follows is what makes the content trustworthy."""
     import httpx
 
-    with httpx.Client(timeout=httpx.Timeout(30.0, connect=10.0), follow_redirects=True) as client:
+    if not url.startswith("https://"):
+        raise TriggerError("Only HTTPS downloads are allowed.")
+    with httpx.Client(timeout=httpx.Timeout(60.0, connect=10.0), follow_redirects=True) as client:
         with client.stream("GET", url) as response:
             if response.status_code != 200 or response.url.scheme != "https":
                 raise TriggerError(f"The download failed (status {response.status_code}).")
             body = bytearray()
             for part in response.iter_bytes():
                 body += part
-                if len(body) > MAX_MODEL_BYTES:
+                if len(body) > max_bytes:
                     raise TriggerError("The download was far bigger than expected, so it was stopped.")
             return bytes(body)
 
@@ -364,7 +366,13 @@ class Triggers:
                 self._last_reject, self._above = now, 0
                 self.rejected += 1
                 if self._audit is not None:
-                    self._audit.record("wake_rejected", source=event.source, score=event.score, reason="no voice")
+                    reason = getattr(self._voice_check, "failed", None) or "no voice"
+                    extra = {}
+                    voice_score = getattr(self._voice_check, "score", None)
+                    if isinstance(voice_score, float):
+                        extra["voice_score"] = round(voice_score, 3)      # a number, never sound
+                    self._audit.record("wake_rejected", source=event.source, score=event.score,
+                                       reason=reason, **extra)
                 return None
         self._last_wake = now
         self._above = 0

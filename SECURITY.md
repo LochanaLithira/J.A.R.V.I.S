@@ -69,6 +69,13 @@ Nothing else is sent anywhere. In particular:
 - Each spoken command is capped at 15 seconds (a sentence that stops mid-way may get 2 seconds more).
 - A conversation (one `hey jarvis`, then talking freely) ends when you say goodbye or "that's all", after 8 seconds of silence, after 10 commands or 3 minutes, or when Windows is locked. While it is open, anything said near the laptop may be sent to Groq; silence never is, and risky actions still need the keypress.
 
+**Your voice check** (optional, `python -m backend.voice.enroll teach`)
+- Teaching turns each of your 20 "hey jarvis" into 256 voice numbers the moment it is heard and drops the sound. No recording is stored or sent, and the samples are never held together in memory. "Other voices" for comparison are made by Windows' own text-to-speech, in memory.
+- The voiceprint file (`%LOCALAPPDATA%\jarvis\voiceprint.json`) holds only averaged numbers, the bar, and which model made it. It is biometric data, so it stays on your laptop and `enroll delete` removes it.
+- Its SHA-256 is kept in Windows Credential Manager (`voiceprint_digest`). An edited or swapped voiceprint, for example one with a lowered bar, is refused and you are told.
+- Too little sound to recognise anyone counts as "not you". If the check itself can't run, J.A.R.V.I.S warns you and (by default) answers any voice; `VOICE_CHECK_STRICT = True` makes it ignore every "hey jarvis" instead.
+- The model (WeSpeaker ResNet34) is fingerprint-checked like the wake-word models. Rejected wake-ups are audited as "not your voice" with the score, a number, never sound.
+
 **Program**
 - One copy only, enforced with a Windows lock (two copies would break the audit chain).
 - A watchdog restarts listening after unexpected errors; a microphone that goes silent after sleep is reopened.
@@ -96,7 +103,8 @@ Nothing else is sent anywhere. In particular:
 | The AI misunderstands or invents an action | "delete" heard as something else; a made-up tool | Approved tools only; strict argument checks; keypress for high-risk tools; moves and deletes are reversible |
 | Prompt injection in your speech | "Ignore your rules and..." | Rules are in the system prompt, never mixed with your words; the AI has no tools of its own; the gate re-checks everything |
 | Prompt injection in data | A note or file that contains instructions | Tool results never go back to the AI |
-| Someone else talks to your laptop | A visitor, or a TV saying "hey jarvis" | Waking gives no permission; risky actions need a keypress; the mic is closed while Windows is locked |
+| Someone else talks to your laptop | A visitor, or a TV saying "hey jarvis" | Waking gives no permission; with a voiceprint, other voices don't wake it; risky actions need a keypress; the mic is closed while Windows is locked |
+| Weakening the voice check | Editing the voiceprint to lower the bar | Its fingerprint lives in Credential Manager; a changed file is refused and reported |
 | Misheard or false wake-up | A video triggers the wake word | Silence is never sent; nothing runs without a clear command; wake-ups are audited |
 | Path tricks on files | `..\`, `C:\Windows`, a junction pointing elsewhere | Names only; links and junctions invisible; real location checked |
 | Running a disguised program | `invoice.pdf.exe` | Only document and media types open |
@@ -119,7 +127,7 @@ Being honest about limits matters as much as the protections:
 - **Apps you installed are trusted.** Any windowed app in your Start menu that isn't blocked can be opened, and its shortcut's own settings are used. Something that can add shortcuts to your Start menu already runs as you (see the first point).
 - **Opening a document runs its default app.** A malicious document in your Downloads could attack that app. Only document and media types are allowed, but the app itself is outside J.A.R.V.I.S.'s control.
 - **The audit log is evidence, not a vault.** It is tamper-evident, not tamper-proof, and it holds your command text in plain form on your disk.
-- **Voice is not identity.** J.A.R.V.I.S. does not recognise *who* is speaking.
+- **Voice is not proof of identity.** Without a voiceprint, J.A.R.V.I.S. does not know *who* is speaking. With one, it checks only the "hey jarvis" moment (not follow-ups in a conversation), and a recording of your voice or a good voice clone can still pass. That's fine because waking grants no permission, but the voice check is a filter, not a lock.
 
 ## Adding a new tool safely
 
