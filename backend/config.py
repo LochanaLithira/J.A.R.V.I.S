@@ -15,11 +15,9 @@ AUDIT_LOG = _base / "jarvis" / "audit.jsonl"
 # Capped at about 3 MB in total (1 MB plus two older copies).
 APP_LOG = _base / "jarvis" / "jarvis.log"
 
-# Short name -> full path of the program. Add apps one at a time, with full paths.
-ALLOWED_APPS = {
-    "notepad": r"C:\Windows\System32\notepad.exe",
-    "calculator": r"C:\Windows\System32\calc.exe",
-}
+# Apps: any app in your Start menu can be opened by name, except command lines, script hosts,
+# admin tools and the like. That blocked list is security code, so it lives in
+# backend/tools/apps.py rather than here.
 
 # The only folders the file tools may touch, by name. Remove a name to keep J.A.R.V.I.S out of it.
 # "workspace" is the folder above; the others are found where Windows really keeps them (even if
@@ -42,7 +40,7 @@ USER_ADDRESS = "sir"
 # Say a short greeting ("Good morning, sir. All systems are online.") when it starts.
 GREETING_ON_START = True
 # Answer out loud when you say "hey jarvis" ("Yes, sir?"), then listen. False = only the chime.
-# The replies are prepared once at startup (in memory), so they play straight away.
+# No voice audio is cached, so each reply is fetched fresh and streamed (about a second).
 WAKE_REPLY = True
 # Before answering, wait this long. If you carry straight on ("hey jarvis, open notepad") it stays
 # quiet and takes the whole sentence; if you pause, it says "Yes, sir?".

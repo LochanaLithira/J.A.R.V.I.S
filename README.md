@@ -16,7 +16,8 @@ A security-focused, voice-enabled personal assistant for Windows. J.A.R.V.I.S. t
 - **Runs in the background** with a tray icon, and an on-demand futuristic screen showing live status, the conversation, timers and activity.
 - **Smart follow-ups:** when J.A.R.V.I.S. asks you a question, answer without saying the wake word again.
 - **Safety gate for every action:** the AI can suggest an action, but it cannot execute tools directly.
-- **Approved tools only:** notes, configured Windows applications, file tools limited to named folders, and timers are registered explicitly.
+- **Approved tools only:** notes, opening apps from your Start menu, PC controls (volume, media, brightness, battery, CPU, lock), switching and closing windows, file tools limited to named folders, and timers are registered explicitly.
+- **No command lines, ever:** "open app" refuses terminals, PowerShell, script hosts, the Registry Editor, admin tools and uninstallers, judged by the real program behind each shortcut.
 - **Confirmation for risky actions** and rate limiting for AI requests.
 - **Tamper-evident audit logging** stored outside the writable workspace.
 - **Credential protection** through Windows Credential Manager via `keyring`.
@@ -181,7 +182,10 @@ Examples:
 
 Things you can say once it is listening, for example:
 
-- "open notepad", "make a note called shopping and write buy milk"
+- "open spotify", "open word", "make a note called shopping and write buy milk"
+- "volume 30", "turn it down", "mute", "pause the music", "next song"
+- "make the screen brighter", "how much battery do I have", "how busy is the CPU"
+- "switch to Word", "show me the desktop", "close notepad" (it can still ask to save), "lock my PC"
 - "what's in my downloads", "find my budget file", "open my documents folder"
 - "move cv from downloads to documents", "rename draft to final in documents"
 - "delete report from my desktop" (moves it to the workspace trash after you press Y)
@@ -196,7 +200,6 @@ Most local settings are in `backend/config.py`, including:
 - The writable workspace: `WORKSPACE`.
 - The audit log location: `AUDIT_LOG`.
 - The error log location: `APP_LOG`.
-- Allowed Windows applications: `ALLOWED_APPS`.
 - Folders the file tools may use: `FILE_FOLDERS`.
 - AI models and request timeout.
 - Microphone selection and wake-word sensitivity.
@@ -207,7 +210,7 @@ Most local settings are in `backend/config.py`, including:
 - Conversation mode: `CONVERSATION_MODE` (on), `CONVERSATION_SECONDS`, `CONVERSATION_MAX_TURNS`, `CONVERSATION_MAX_SECONDS`, `CONVERSATION_MEMORY_TURNS`.
 - Follow-ups when conversation mode is off: `FOLLOW_UP_ON_QUESTION`, `FOLLOW_UP_SECONDS`, `FOLLOW_UP_MAX_TURNS`.
 
-Only applications explicitly added to `ALLOWED_APPS` can be opened by the application tools. Use full executable paths and review changes carefully.
+Any app in your Start menu can be opened by name, except the blocked ones. The blocked list is security code, so it lives in `backend/tools/apps.py` rather than in the settings.
 
 ## Security and privacy
 
@@ -231,7 +234,7 @@ Run the test suite with:
 python -m pytest
 ```
 
-The tests cover the command flow, safety gate, configuration, credentials, tools (notes, apps, files, timers), voice input/output, wake triggers, follow-ups, the background app, the tray, the screen, autostart, and audit logging.
+The tests cover the command flow, safety gate, configuration, credentials, tools (notes, apps, PC controls, windows, files, timers), voice input/output, wake triggers, follow-ups, the background app, the tray, the screen, autostart, and audit logging.
 
 Tests never touch your real Documents or Downloads, and never change your real Startup folder. Tests that open real windows on screen are skipped unless you set `JARVIS_GUI_TESTS=1`.
 
@@ -248,7 +251,7 @@ Tests never touch your real Documents or Downloads, and never change your real S
 │   ├── gate/             # Validation, confirmation, execution, and audit logging
 │   ├── main.py           # Background app: listening loop, watchdog, startup
 │   ├── registry.py       # Explicit approved-tool registry
-│   ├── tools/            # Notes, application, file and timer tools
+│   ├── tools/            # Notes, apps, PC controls, windows, files and timers
 │   └── voice/            # Wake word, microphone, speech input, and speech output
 ├── frontend/             # Everything you see (imports nothing from backend)
 │   ├── confirm.py        # Keypress confirmation and private-reply popups

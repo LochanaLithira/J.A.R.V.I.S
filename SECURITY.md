@@ -54,7 +54,10 @@ Nothing else is sent anywhere. In particular:
 ## Protections in place
 
 **Actions**
-- Only explicitly registered tools exist. Apps open only from a fixed allowlist of full paths, with no shell and no arguments.
+- Only explicitly registered tools exist.
+- Apps open only from Windows' own Start menu list, by the name you said. The AI never supplies a path, command or argument: the app is opened by its Windows ID, exactly as the Start menu would. Deny by default: an entry is offered only if it is a Store app, or if the real program behind it (not its label, so a renamed shortcut can't sneak through) is a windowed `.exe` that is not on the blocked list in `backend/tools/apps.py`. Command lines, PowerShell, Terminal, WSL, script hosts (mshta, rundll32, regsvr32, wscript...), interpreters, the Registry Editor, Task Manager, admin consoles, installers, uninstallers and Quick Assist are blocked, as are documents and web links. Which apps you have installed is never sent to the AI.
+- PC controls (volume, media keys, brightness, battery, CPU, lock) use Windows' own interfaces and start no program. Brightness never goes below 5%, so the screen can't be blacked out.
+- Windows are matched by app name. A window's title (which can hold an email subject or file name) is only compared on your PC, as a last resort; it is never sent to the AI or the voice service, or shown. Closing is polite only (like clicking X, so the app can still ask to save), one window at a time, never force-killed, and never J.A.R.V.I.S., Explorer or Windows' own system windows.
 - File tools reach only a named list of folders (`FILE_FOLDERS` in `config.py`), by file *name*, never by path. Hidden files, system files, links and junctions are invisible, and each file's real location must still be inside its folder.
 - Only documents and media can be opened, never programs, scripts or shortcuts. Nothing is ever overwritten. A rename cannot change a file's type. "Delete" moves the file to the workspace trash, after a keypress.
 - Notes cannot be overwritten and live only inside the workspace.
@@ -97,6 +100,8 @@ Nothing else is sent anywhere. In particular:
 | Misheard or false wake-up | A video triggers the wake word | Silence is never sent; nothing runs without a clear command; wake-ups are audited |
 | Path tricks on files | `..\`, `C:\Windows`, a junction pointing elsewhere | Names only; links and junctions invisible; real location checked |
 | Running a disguised program | `invoice.pdf.exe` | Only document and media types open |
+| Getting a command line through "open app" | "open powershell", a shortcut renamed to look harmless, "open Run" | Apps judged by their real program; command lines, script hosts, admin tools and console programs are blocked; no arguments ever passed |
+| Remote-control scams | A caller says "ask your assistant to open Quick Assist" | Quick Assist and Remote Assistance are blocked |
 | Key theft from files or logs | A leaked log or screenshot | Keys live only in Credential Manager and never appear in output |
 | Network attacker | A changed download or a redirect | HTTPS, no redirects, fingerprint-checked models, hash-pinned packages |
 | A website talking to J.A.R.V.I.S. | A page in your browser probing local servers | There is no local server or port |
@@ -110,6 +115,8 @@ Being honest about limits matters as much as the protections:
 - **Malware already running as you.** It can read your files, read the same Credential Manager entries, synthesize the Y keypress, and rewrite the whole audit log. J.A.R.V.I.S. cannot defend against software with your own rights.
 - **The cloud providers.** What you say goes to Google, and the spoken command audio goes to Groq, under their own terms. On free tiers they may keep or review it.
 - **Medium-risk actions run without asking.** Opening a document, creating a note, or moving and renaming a file run straight away; they are reversible, but a misheard command can do one of them.
+- **Closing an app runs without asking.** It is MEDIUM risk: polite, so the app's own "Save changes?" protects your work, but an app that doesn't ask will close. A misheard "close Word" closes Word.
+- **Apps you installed are trusted.** Any windowed app in your Start menu that isn't blocked can be opened, and its shortcut's own settings are used. Something that can add shortcuts to your Start menu already runs as you (see the first point).
 - **Opening a document runs its default app.** A malicious document in your Downloads could attack that app. Only document and media types are allowed, but the app itself is outside J.A.R.V.I.S.'s control.
 - **The audit log is evidence, not a vault.** It is tamper-evident, not tamper-proof, and it holds your command text in plain form on your disk.
 - **Voice is not identity.** J.A.R.V.I.S. does not recognise *who* is speaking.

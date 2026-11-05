@@ -10,10 +10,10 @@ from backend.flow import Flow, FlowError
 from backend.gate.audit import AuditLog
 from backend.gate.gate import Gate
 from backend.gate.models import Param, Risk, Tool
-from backend.tools.apps import make_app_tools
+from backend.tools.apps import AppCatalog, AppEntry, make_app_tools
 from backend.tools.notes import make_note_tools
 
-ALLOWED = {"notepad": r"C:\Windows\System32\notepad.exe"}
+APPS = AppCatalog(lister=lambda: [AppEntry("notepad", "Microsoft.WindowsNotepad_8wekyb3d8bbwe!App")])
 
 
 class ScriptedBrain:
@@ -35,7 +35,7 @@ def action(tool, **args):
 
 def make_gate(tmp_path, launcher=None, extra=()):
     tools = [*make_note_tools(tmp_path / "ws"),
-             *make_app_tools(ALLOWED, launcher or (lambda *a, **k: None)), *extra]
+             *make_app_tools(APPS, launcher or (lambda *a, **k: None)), *extra]
     return Gate(tools, AuditLog(tmp_path / "log.jsonl"), max_calls=1000)
 
 
