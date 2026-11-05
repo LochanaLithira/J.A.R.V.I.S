@@ -85,7 +85,8 @@ Nothing else is sent anywhere. In particular:
 
 **Screen**
 - Separate process; loaded from local files only, with a strict Content-Security-Policy; text is always shown as text, never as HTML.
-- It accepts only a fixed list of display updates, and can send back exactly one command: pause or resume.
+- It accepts only a fixed list of display updates, and can send back only bare button names: pause or resume, and the Settings page's voice buttons (teach start / record / redo / cancel, test, forget, status). No text or data can be sent, so it can't run tools or reach anything else. Teaching progress shown on it holds no audio and no voice numbers.
+- "Forget my voice" weakens security, so it needs the same Y-keypress window as deleting a file.
 - Private mode, no downloads, no right-click menu, no developer tools.
 
 ## Threat model

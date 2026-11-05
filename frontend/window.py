@@ -9,7 +9,8 @@ How it stays safe:
 - J.A.R.V.I.S -> window: only a fixed list of screen updates (HUD calls) is accepted, and every
   value is passed as JSON, never pasted into code. The page itself shows text with textContent,
   never as HTML, and its Content-Security-Policy blocks outside scripts and connections.
-- window -> J.A.R.V.I.S: exactly one possible command, "toggle_pause". The window cannot run tools.
+- window -> J.A.R.V.I.S: only the bare command names in COMMANDS (pause, and the Settings page's
+  voice buttons), with no data attached. The window cannot run tools or send any text.
 - Private mode (nothing stored), no downloads, no right-click menu, no developer tools.
 
     python -m frontend.window      (started by the app; reads updates on stdin)
@@ -30,9 +31,12 @@ PAGE = Path(__file__).resolve().parent / "screen" / "index.html"
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 # The only screen calls J.A.R.V.I.S may make, with how many arguments each takes.
-ALLOWED_CALLS = {"setState": 2, "setLevel": 1, "addMessage": 3, "setTimers": 1, "addActivity": 1, "setSystems": 1}
+ALLOWED_CALLS = {"setState": 2, "setLevel": 1, "addMessage": 3, "setTimers": 1, "addActivity": 1, "setSystems": 1,
+                 "teach": 1, "setVoice": 1}
 MAX_LINE_CHARS = 200_000
-COMMANDS = {"toggle_pause"}
+# Every button the page has. Kept in step with backend/settings.py (this side never imports it).
+COMMANDS = frozenset({"toggle_pause", "teach_start", "teach_record", "teach_redo", "teach_cancel", "voice_test",
+                      "voice_forget", "voice_status"})
 
 
 def to_js(message: Any) -> str | None:
@@ -54,13 +58,39 @@ def to_js(message: Any) -> str | None:
 # ---------------------------------------------------------------------------
 
 class _Api:
-    """What the page may call. Exactly one thing: ask to pause or resume listening."""
+    """What the page may call: one method per button, each taking nothing. pywebview exposes
+    every public method, so this class has no others."""
 
     def __init__(self, out: TextIO, lock: threading.Lock):
         self._out, self._lock = out, lock
 
+    def _press(self, name: str) -> None:
+        if name in COMMANDS:
+            _write_line(self._out, self._lock, {"cmd": name})
+
     def toggle_pause(self) -> None:
-        _write_line(self._out, self._lock, {"cmd": "toggle_pause"})
+        self._press("toggle_pause")
+
+    def teach_start(self) -> None:
+        self._press("teach_start")
+
+    def teach_record(self) -> None:
+        self._press("teach_record")
+
+    def teach_redo(self) -> None:
+        self._press("teach_redo")
+
+    def teach_cancel(self) -> None:
+        self._press("teach_cancel")
+
+    def voice_test(self) -> None:
+        self._press("voice_test")
+
+    def voice_forget(self) -> None:
+        self._press("voice_forget")
+
+    def voice_status(self) -> None:
+        self._press("voice_status")
 
 
 def _write_line(out: TextIO, lock: threading.Lock, message: dict) -> None:
@@ -278,6 +308,22 @@ class ScreenLink:
 
     def refresh_timers(self) -> None:
         self._send_timers()
+
+    def teach(self, update: dict) -> None:
+        """Progress while teaching your voice (numbers and short messages only)."""
+        self._call("teach", update)
+
+    def set_voice(self, status: dict) -> None:
+        """What the Settings page's Voice section shows. The bottom bar's lights follow too."""
+        self._call("setVoice", status)
+        self.refresh_systems()
+
+    def refresh_systems(self) -> None:
+        if self._get_systems is not None:
+            try:
+                self._call("setSystems", self._get_systems())
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":
