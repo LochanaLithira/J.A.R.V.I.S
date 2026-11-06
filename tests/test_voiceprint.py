@@ -150,16 +150,16 @@ def people(n=200, near=0.0):
     return [normalize(near * ME + someone_else()) for _ in range(n)]
 
 
-def test_the_bar_sits_a_quarter_of_the_way_from_the_closest_other_voice_to_you():
+def test_the_bar_sits_just_above_the_closest_other_voice():
     others = people(400, near=0.6)                                # strangers who sound a bit like you
     result = calibrate([like_me() for _ in range(20)], others)
     vp = result.voiceprint
     assert vp is not None and vp.threshold < result.yours[0] and result.bar == vp.threshold
     centroid = np.array(vp.centroid)
     assert all(vpm.similarity(o, centroid) < vp.threshold for o in others)        # none of them get in
-    gap = result.yours[0] - result.others
-    assert vp.threshold == pytest.approx(result.others + vpm.BAR_GAP_SHARE * gap)
+    assert vp.threshold == pytest.approx(result.others + vpm.BAR_ABOVE_CLOSEST)
     assert vpm.similarity(like_me(), centroid) >= vp.threshold
+
 
 def test_the_upper_limit_never_pulls_the_bar_below_other_people():
     others = people(200, near=8.0)                               # strangers score ~0.99
