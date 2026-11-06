@@ -123,7 +123,7 @@ class Style:
         return self._fill(self._pick(_ACKNOWLEDGE))
 
     def acknowledgements(self) -> list[str]:
-        """Every wake-up reply, so they can be prepared in advance and play instantly."""
+        """Every wake-up reply."""
         return [self._fill(t) for t in _ACKNOWLEDGE]
 
     def farewell(self) -> str:

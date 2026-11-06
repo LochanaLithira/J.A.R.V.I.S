@@ -49,6 +49,8 @@ from .voice.style import Style
 from .voice.triggers import (ALARM_CHIME, CHUNK, SAMPLE_RATE, ClapDetector, Microphone, TriggerError, Triggers,
                              WakeEvent, WakeWordDetector, pick_microphone, play_chime, play_close_chime,
                              play_done_chime)
+from .voice.voiceprint import (AllChecks, SpeakerCheck, SpeakerModel, StrictCheck, VoiceprintError, command_judge,
+                               load_voiceprint)
 
 log = logging.getLogger("jarvis")
 
@@ -241,6 +243,8 @@ class Assistant:
                  style: Style | None = None,
                  retry_seconds: float = RETRY_SECONDS, mic_idle_seconds: float = MIC_IDLE_SECONDS):
         self._triggers, self._speech, self._get_flow, self._voice = triggers, speech, get_flow, voice
+        if speech is not None and getattr(speech, "voice_judge", "absent") is None:
+            speech.voice_judge = command_judge(getattr(triggers, "_voice_check", None))
         self._warm = warm                     # reconnect to the cloud services while you speak
         self._follow_on_question = follow_up_on_question
         self._follow_seconds, self._follow_max = follow_up_seconds, follow_up_max_turns
@@ -259,7 +263,7 @@ class Assistant:
         self._device, self._mic_factory, self._chime = device, mic_factory, chime
         self._show_text, self._on_status, self._on_notice, self._out = show_text, on_status, on_notice, out
         self._retry, self._mic_idle = retry_seconds, mic_idle_seconds
-        self._paused = self._locked = self._asleep = False
+        self._paused = self._locked = self._asleep = self._teaching = False
         self._stop = threading.Event()
         self._interrupt = threading.Event()   # set whenever the microphone must be let go at once
         self._thread: threading.Thread | None = None
@@ -291,6 +295,22 @@ class Assistant:
     def set_asleep(self, asleep: bool) -> None:
         """The laptop is going to sleep (True) or has woken up (False). Waking also reopens the mic."""
         self._change("_asleep", asleep)
+
+    def set_teaching(self, teaching: bool) -> None:
+        """You are teaching J.A.R.V.I.S your voice (True): it lets go of the microphone so it
+        doesn't answer each "hey jarvis", and takes it back when you finish (False)."""
+        self._change("_teaching", teaching)
+
+    @property
+    def voice_check(self) -> Any:
+        return getattr(self._triggers, "_voice_check", None)
+
+    def set_voice_check(self, check: Any) -> None:
+        """Swap the wake-up checks (e.g. your voice check just switched on), without a restart.
+        Your commands are then checked with the same voiceprint."""
+        self._triggers.set_voice_check(check)
+        if self._speech is not None and hasattr(self._speech, "voice_judge"):
+            self._speech.voice_judge = command_judge(check)
 
     def announce(self, label: str) -> None:
         """A timer finished (called from the timer thread). Handled by the loop within ~0.1 s."""
@@ -337,7 +357,7 @@ class Assistant:
                 mic.drain()
 
     def listening_allowed(self) -> bool:
-        return not (self._paused or self._locked or self._asleep or self._stop.is_set())
+        return not (self._paused or self._locked or self._asleep or self._teaching or self._stop.is_set())
 
     def start(self) -> None:
         self._thread = threading.Thread(target=self.run, name="jarvis-listen", daemon=True)
@@ -415,7 +435,7 @@ class Assistant:
         self._set_status(Status.STOPPED)
 
     def _idle_status(self) -> Status:
-        if self._paused:
+        if self._paused or self._teaching:
             return Status.PAUSED
         if self._locked:
             return Status.LOCKED
@@ -529,7 +549,7 @@ class Assistant:
         elif is_stop_phrase(heard.text):
             self._goodbye()                      # "hey jarvis... never mind"
         elif heard.text:
-            act_s, voice_s, result = self._act(heard.text)
+            act_s, voice_s, result = self._act(heard.text, voice=heard.voice)
             # durations only, never words: shows where the time goes
             log.info("timing: listening and hearing %.1fs, AI and action %.1fs, voice %.1fs",
                      heard_s, act_s, voice_s)
@@ -603,7 +623,7 @@ class Assistant:
             if is_stop_phrase(heard.text):
                 self._goodbye()
                 return
-            _, _, result = self._act(heard.text, tuple(memory))
+            _, _, result = self._act(heard.text, tuple(memory), voice=heard.voice)
             turn = self._turn(heard.text, result)
             if turn is not None:
                 memory.append(turn)
@@ -624,9 +644,10 @@ class Assistant:
         else:
             self._emit("nothing", reason=heard.reason)
 
-    def _act(self, text: str, history: tuple[Turn, ...] = ()) -> tuple[float, float, Any]:
+    def _act(self, text: str, history: tuple[Turn, ...] = (), voice: str | None = None) -> tuple[float, float, Any]:
         """Run a heard command like say. Returns (seconds for AI and action, seconds speaking,
-        the result, or None if nothing ran)."""
+        the result, or None if nothing ran). `voice` is the voice check's verdict on the command:
+        actions that change things or show your data need it to be "you" (the gate decides)."""
         t0 = time.monotonic()
         if self._get_flow is None:
             self._say_out("NO: The AI is not set up.")
@@ -635,7 +656,8 @@ class Assistant:
         self._emit("thinking")
         try:
             flow = self._get_flow()
-            result = flow.run(text, history) if history else flow.run(text)
+            extra = {"voice": voice} if voice is not None else {}
+            result = flow.run(text, history, **extra) if history else flow.run(text, **extra)
         except (BrainError, CredentialError, FlowError) as exc:
             self._say_out(f"NO: {exc}")
             self._notice(str(exc))
@@ -663,6 +685,74 @@ class Assistant:
         return t1 - t0, time.monotonic() - t1, result
 
 
+def _speech_trimmer() -> Any:
+    """Silero VAD for the voice check, so only the part where you speak is compared."""
+    try:
+        return SileroVAD(config.MODELS_DIR)
+    except Exception as exc:
+        log.error("voice check speech trimmer unavailable: %s", type(exc).__name__)
+        return None
+
+
+def make_speaker_check(get: Callable[[str], str | None] = get_secret,
+                       model_factory: Callable[[Any], Any] = SpeakerModel,
+                       vad_factory: Callable[[], Any] = _speech_trimmer) -> tuple[Callable | None, str]:
+    """Your voice check, if you have taught J.A.R.V.I.S your voice: (check or None, problem text).
+
+    A changed voiceprint or a missing model is never ignored silently: the problem is reported,
+    and VOICE_CHECK_STRICT decides whether "hey jarvis" carries on without the check or is refused."""
+    if not config.VOICE_CHECK:
+        return None, ""
+    try:
+        voiceprint = load_voiceprint(config.VOICEPRINT, get)
+        if voiceprint is None:
+            return None, ""                          # not taught yet: nothing to check
+        check = SpeakerCheck(model_factory(config.MODELS_DIR), voiceprint, vad=vad_factory())
+        return (StrictCheck(check) if config.VOICE_CHECK_STRICT else check), ""
+    except VoiceprintError as exc:
+        problem = str(exc)
+    except Exception as exc:
+        log.error("voice check failed to start: %s", type(exc).__name__)
+        problem = "The voice check couldn't start."
+    if config.VOICE_CHECK_STRICT:
+        return StrictCheck(None), problem + " Until it is fixed, every \"hey jarvis\" is ignored."
+    return None, problem + " Until it is fixed, J.A.R.V.I.S answers any voice."
+
+
+def make_voice_settings(get_assistant: Callable[[], Any], screen: Any, confirm: Callable[[str, dict], bool]) -> Any:
+    """The Settings page's voice buttons, wired to the real microphone, model and Credential Manager.
+    A quiet thread cancels a teaching session that was left alone."""
+    from .credentials import delete_secret, set_secret
+    from .settings import VoiceSettings
+    from .voice.enroll import screen_prepare
+    from .voice.other_voices import other_voices
+    from .voice.teaching import TeachingSession
+
+    def make_session(save, pause_listening, on_update, current):
+        made: list = []
+
+        def voices() -> list:
+            """Windows' voices, made once per session in memory (for chatter copies and comparing)."""
+            if not made:
+                made.append(other_voices())
+            return made[0]
+
+        return TeachingSession(screen_prepare(on_level=lambda chunk: screen.set_level(sound_level(chunk)),
+                                              voices=voices),
+                               voices, save, pause_listening, on_update, current=current)
+
+    settings = VoiceSettings(get_assistant, screen.teach, screen.set_voice, confirm, get_secret, set_secret,
+                             delete_secret, make_session, model_factory=SpeakerModel, vad_factory=_speech_trimmer)
+
+    def watch() -> None:
+        while True:
+            time.sleep(10)
+            settings.check_idle()
+
+    threading.Thread(target=watch, name="jarvis-settings-idle", daemon=True).start()
+    return settings
+
+
 def build_assistant(audit: Any, get_flow: Callable[[], Flow] | None, voice: Voice | None, *,
                     out: Callable[[str], None] | None = None, show_text: Callable[[str], Any] | None = None,
                     on_status: Callable[[Status, str], None] | None = None,
@@ -679,8 +769,13 @@ def build_assistant(audit: Any, get_flow: Callable[[], Flow] | None, voice: Voic
         clap = ClapDetector(config.CLAP_MIN_LEVEL, on_clap=on_clap)
     voice_check = (VoiceCheck(SileroVAD(config.MODELS_DIR), config.WAKE_MIN_SPEECH_SECONDS,
                               config.WAKE_SPEECH_CONFIDENCE) if config.WAKE_SPEECH_CHECK else None)
+    speaker, problem = make_speaker_check()
+    if problem and on_notice is not None:
+        on_notice(problem)
+    checks = [(name, c) for name, c in (("no voice", voice_check), ("not your voice", speaker)) if c is not None]
     triggers = Triggers(wake, clap, config.WAKE_THRESHOLD, config.WAKE_PATIENCE,
-                        config.WAKE_COOLDOWN_SECONDS, audit=audit, voice_check=voice_check)
+                        config.WAKE_COOLDOWN_SECONDS, audit=audit,
+                        voice_check=AllChecks(checks) if checks else None)
     return Assistant(triggers, make_speech(audit, on_recorded=play_done_chime), get_flow, voice,
                      pick_microphone(config.MIC_DEVICE), show_text=show_text, on_status=on_status,
                      on_notice=on_notice, out=out, warm=warm_all,
@@ -870,18 +965,33 @@ def main() -> int:
         if "a" in holder:
             holder["a"].toggle_pause()
 
+    def voice_check_state() -> str:
+        a = holder.get("a")
+        check = getattr(getattr(a, "_triggers", None), "_voice_check", None)
+        names = [name for name, _ in getattr(check, "_checks", [])]
+        return "on" if "not your voice" in names else "off"
+
     def systems() -> list[dict]:
         keys = key_status()
         a = holder.get("a")
         return [{"name": "Microphone", "ok": a is not None and a.status is not Status.PROBLEM},
                 {"name": "Wake word", "ok": a is not None},
+                {"name": "Voice check", "ok": voice_check_state() == "on"},
                 {"name": "Gemini", "ok": keys.get("gemini_api_key", False)},
                 {"name": "Groq", "ok": keys.get("stt_api_key", False)},
                 {"name": "Fish Audio", "ok": keys.get("fish_api_key", False)},
                 {"name": "Audit chain intact", "ok": gate.audit.verify()[0]}]
 
-    screen = ScreenLink(on_command=lambda cmd: toggle_pause() if cmd == "toggle_pause" else None,
-                        get_systems=systems, get_timers=timers.snapshot)
+    settings_box: dict[str, Any] = {}
+
+    def on_command(cmd: str) -> None:
+        if cmd == "toggle_pause":
+            toggle_pause()
+        elif "s" in settings_box:
+            settings_box["s"].handle(cmd)
+
+    screen = ScreenLink(on_command=on_command, get_systems=systems, get_timers=timers.snapshot)
+    settings_box["s"] = make_voice_settings(lambda: holder.get("a"), screen, popup_confirm)
     feed_status, feed_event = screen_feed(screen)
     tray = Tray(on_toggle_pause=toggle_pause,
                 is_paused=lambda: holder["a"].paused if "a" in holder else False,
@@ -917,9 +1027,6 @@ def main() -> int:
         holder["a"].start()
         if config.GREETING_ON_START:
             holder["a"].say_line(Style(config.USER_ADDRESS).greeting())
-        if config.WAKE_REPLY:                # prepare "Yes, sir?" now, so waking answers instantly
-            threading.Thread(target=voice.prefetch, args=(Style(config.USER_ADDRESS).acknowledgements(),),
-                             name="jarvis-prefetch", daemon=True).start()
     try:
         tray.run()                       # the Windows message loop; returns when you choose Quit
     finally:

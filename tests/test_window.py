@@ -73,13 +73,30 @@ def test_pump_applies_updates_and_closes_when_the_pipe_ends():
     assert w.restored == 1 and w.destroyed
 
 
-def test_the_page_can_only_ask_to_pause():
+def test_the_page_can_only_press_the_listed_buttons():
+    import inspect
+
     out = io.StringIO()
     api = window._Api(out, threading.Lock())
-    api.toggle_pause()
-    assert json.loads(out.getvalue()) == {"cmd": "toggle_pause"}
     public = [n for n in dir(api) if not n.startswith("_")]
-    assert public == ["toggle_pause"]
+    assert set(public) == set(window.COMMANDS)
+    for name in public:
+        assert list(inspect.signature(getattr(api, name)).parameters) == []      # no data can be sent
+        out.seek(0), out.truncate()
+        getattr(api, name)()
+        assert json.loads(out.getvalue()) == {"cmd": name}
+
+
+def test_screen_buttons_match_the_backend_list():
+    from backend.settings import COMMANDS as SETTINGS
+
+    assert window.COMMANDS == {"toggle_pause", *SETTINGS}
+
+
+def test_teaching_updates_go_through_as_data():
+    js = to_js({"call": "teach", "args": [{"phase": "waiting", "done": 3, "of": 20, "message": "<b>x</b>"}]})
+    assert js.startswith("window.HUD && window.HUD.teach(...[") and "<b>x</b>" in js     # data, shown as text
+    assert to_js({"call": "teach", "args": [{}, {}]}) is None
 
 
 def test_page_is_a_local_file():
@@ -193,17 +210,18 @@ def test_second_open_brings_the_window_forward(link):
     assert len(procs) == 1 and procs[0].written[-1] == {"call": "focus"}
 
 
-def test_only_the_pause_command_is_accepted(link):
+def test_only_listed_commands_are_accepted(link):
     s, procs, commands = link
     s.open()
     proc = procs[0]
     for message in ({"cmd": "toggle_pause"}, {"cmd": "run_tool", "tool": "delete_file"}, {"cmd": "quit"},
-                    "garbage\n", ["toggle_pause"]):
+                    "garbage\n", ["toggle_pause"], {"cmd": "teach_start"}, {"cmd": "set_secret"},
+                    {"cmd": "TEACH_START"}):
         proc.reply(message)
     proc.reply({"cmd": "toggle_pause"})
-    assert wait_for(lambda: len(commands) == 2)
+    assert wait_for(lambda: len(commands) == 3)
     time.sleep(0.05)
-    assert commands == ["toggle_pause", "toggle_pause"]
+    assert commands == ["toggle_pause", "teach_start", "toggle_pause"]
 
 
 def test_sound_level_updates_are_rate_limited(link):
@@ -346,3 +364,13 @@ def test_real_screen_opens_and_takes_updates():
     finally:
         s.close()
     assert wait_for(lambda: not s.is_open, timeout=10)
+
+
+def test_voice_status_also_refreshes_the_system_lights(link):
+    s, procs, _ = link
+    s.open()
+    procs[0].reply({"event": "ready"})
+    assert wait_for(lambda: "setTimers" in calls(procs[0]))
+    before = calls(procs[0]).count("setSystems")
+    s.set_voice({"taught": True, "on": True})
+    assert calls(procs[0])[-2:] == ["setVoice", "setSystems"] and calls(procs[0]).count("setSystems") == before + 1

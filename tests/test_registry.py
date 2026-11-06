@@ -7,12 +7,27 @@ from backend.tools.notes import make_note_tools
 
 FILE_TOOLS = {"list_files", "find_files", "open_file", "open_folder", "move_file", "rename_file", "delete_file"}
 TIMER_TOOLS = {"set_timer", "list_timers", "cancel_timer"}
+PC_TOOLS = {"set_volume", "volume", "media", "set_brightness", "brightness", "pc_status", "lock_pc"}
+WINDOW_TOOLS = {"switch_to_app", "minimize_all", "close_app"}
 
 
 def test_registered_tools_are_exactly_the_approved_set(tmp_path):
     gate = registry.build_gate(tmp_path / "ws", tmp_path / "log.jsonl")
     names = {s["name"] for s in gate.tool_specs()}
-    assert names == {"create_note", "read_note", "list_notes", "open_app"} | FILE_TOOLS
+    assert names == {"create_note", "read_note", "list_notes", "open_app"} | FILE_TOOLS | PC_TOOLS | WINDOW_TOOLS
+
+
+def test_building_the_gate_touches_nothing_on_the_pc(tmp_path, monkeypatch):
+    from backend.tools import apps
+
+    monkeypatch.setattr(apps, "list_start_menu", lambda: pytest.fail("app list read too early"))
+    registry.build_gate(tmp_path / "ws", tmp_path / "log.jsonl")     # the list is read on first use
+
+
+def test_only_closing_an_app_is_medium_risk(tmp_path):
+    gate = registry.build_gate(tmp_path / "ws", tmp_path / "log.jsonl")
+    medium = {s["name"] for s in gate.tool_specs() if s["risk"] == "medium"}
+    assert "close_app" in medium and not (PC_TOOLS | {"open_app", "switch_to_app", "minimize_all"}) & medium
 
 
 def test_timer_tools_only_when_a_timer_service_is_given(tmp_path):
