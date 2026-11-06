@@ -22,6 +22,12 @@ def only_the_test_workspace(monkeypatch):
     monkeypatch.setattr(config, "FILE_FOLDERS", ("workspace",))
 
 
+@pytest.fixture(autouse=True)
+def no_real_voiceprint(monkeypatch, tmp_path):
+    """Tests never read or change your real voiceprint."""
+    monkeypatch.setattr(config, "VOICEPRINT", tmp_path / "voiceprint.json")
+
+
 @pytest.fixture(scope="session")
 def models_dir():
     try:

@@ -876,7 +876,7 @@ def test_build_assistant_from_config(monkeypatch, audit):
     monkeypatch.setattr(config, "CLAP_ENABLED", True)
     a = main.build_assistant(audit, None, None)
     assert a._device == 7 and a._triggers._clap == ("clap", None)
-    assert a._triggers._voice_check == ("voice check", "vad", config.WAKE_MIN_SPEECH_SECONDS)
+    assert a._triggers._voice_check._checks == [("no voice", ("voice check", "vad", config.WAKE_MIN_SPEECH_SECONDS))]
     assert a._speech == ("speech", main.play_done_chime) and a._warm is main.warm_all
     lines = []
     b = main.build_assistant(audit, None, None, out=lines.append)
@@ -1103,3 +1103,62 @@ def test_real_tray_icon_appears_and_goes():
     t.quit()
     th.join(5)
     assert not th.is_alive()
+
+
+# ---- the second voice check: the command's verdict travels to the gate --------------------------------
+
+class VoiceFlow(FakeFlow):
+    def __init__(self, *results):
+        super().__init__(*results)
+        self.voices = []
+
+    def run(self, text, history=(), voice=None):
+        self.voices.append(voice)
+        return super().run(text, history)
+
+
+@pytest.mark.parametrize("verdict", ["you", "not you", "unsure"])
+def test_the_voice_verdict_on_a_command_reaches_the_flow(run_assistant, verdict):
+    flow = VoiceFlow()
+    a, trig, *_ = run_assistant(flow=flow, heard=Heard(text="close notepad", reason="done", voice=verdict))
+    trig.fire.set()
+    assert wait_for(lambda: flow.voices == [verdict])
+
+
+def test_without_a_verdict_the_flow_is_called_as_before(run_assistant):
+    flow = FakeFlow()                                   # its run() takes no voice at all
+    a, trig, *_ = run_assistant(flow=flow)
+    trig.fire.set()
+    assert wait_for(lambda: flow.seen == ["open notepad"])
+
+
+class JudgedSpeech(FakeSpeech):
+    voice_judge = None
+
+
+def test_switching_the_voice_check_also_checks_commands():
+    from backend.voice.voiceprint import AllChecks
+
+    class Speaker:
+        def __call__(self, chunks):
+            return True
+
+        def judge(self, audio):
+            return "you", 1.0
+
+    class Triggers(FakeTriggers):
+        _voice_check = None
+
+        def set_voice_check(self, check):
+            self._voice_check = check
+
+    speech = JudgedSpeech(Heard())
+    a = Assistant(Triggers(), speech, None, None, None)
+    assert speech.voice_judge is None
+    import backend.voice.voiceprint as vpm
+    real = vpm.SpeakerCheck.__new__(vpm.SpeakerCheck)          # a real check object, judge stubbed
+    real.judge = Speaker().judge
+    a.set_voice_check(AllChecks([("not your voice", real)]))
+    assert speech.voice_judge is real.judge
+    a.set_voice_check(None)
+    assert speech.voice_judge is None

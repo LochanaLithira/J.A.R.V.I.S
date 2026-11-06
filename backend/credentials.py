@@ -20,7 +20,9 @@ import keyring
 from keyring.errors import KeyringError, PasswordDeleteError
 
 SERVICE = "jarvis"
-KNOWN_NAMES = ("gemini_api_key", "stt_api_key", "fish_api_key")
+# voiceprint_digest is not a key: it is the SHA-256 of your voiceprint file, kept here so an edited
+# or swapped voiceprint is refused (see backend/voice/voiceprint.py).
+KNOWN_NAMES = ("gemini_api_key", "stt_api_key", "fish_api_key", "voiceprint_digest")
 
 # Visible ASCII only: no spaces, tabs or newlines; 8 to 256 characters.
 _VALUE_RE = re.compile(r"[\x21-\x7e]{8,256}")

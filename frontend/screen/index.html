@@ -24,6 +24,7 @@
       <span id="clock-date">---</span>
     </div>
     <div class="controls">
+      <button id="settings-btn" class="hud-btn" type="button">Settings</button>
       <button id="pause-btn" class="hud-btn" type="button">Pause listening</button>
     </div>
   </header>
@@ -58,6 +59,55 @@
     <ul id="systems" class="systems"></ul>
     <div id="boot-text" class="boot-text"></div>
   </footer>
+
+  <div id="settings" class="overlay" hidden>
+    <div class="overlay-card" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+      <header class="overlay-head">
+        <h2 id="settings-title" class="panel-title"><span>Settings</span><i></i></h2>
+        <button id="settings-close" class="hud-btn" type="button">Close</button>
+      </header>
+
+      <section id="voice-section" class="setting" aria-label="Your voice">
+        <h3 class="setting-name">Your voice</h3>
+        <p id="voice-status" class="setting-status">Checking...</p>
+        <p id="voice-message" class="setting-message"></p>
+        <p class="setting-help">Teach J.A.R.V.I.S your "hey jarvis" so only you can wake it. You say it 20 times,
+          at your own pace. Nothing is recorded: each one becomes numbers straight away, and they stay on this laptop.</p>
+        <div class="setting-actions">
+          <button id="voice-teach" class="hud-btn primary" type="button">Teach my voice</button>
+          <button id="voice-test" class="hud-btn" type="button">Test</button>
+          <button id="voice-forget" class="hud-btn danger" type="button">Forget my voice</button>
+        </div>
+      </section>
+
+      <section id="teach" class="teach" aria-label="Teaching your voice" aria-live="polite" hidden>
+        <div class="teach-top">
+          <div id="teach-dial" class="dial teach-dial"><span id="teach-count">0 / 20</span></div>
+          <div class="teach-words">
+            <div id="teach-phase" class="teach-phase">Getting ready...</div>
+            <div id="teach-tip" class="teach-tip"></div>
+            <div id="teach-message" class="teach-message"></div>
+          </div>
+        </div>
+        <div id="teach-result" class="teach-result" hidden>
+          <div class="scale">
+            <div id="scale-yours" class="scale-yours" title="Your voice"></div>
+            <div id="scale-others" class="scale-others" title="Other voices"></div>
+            <div id="scale-bar" class="scale-bar" title="The bar"></div>
+          </div>
+          <div class="scale-legend">
+            <span class="legend-yours">Your voice</span><span class="legend-others">Other voices</span><span class="legend-bar">The bar</span>
+          </div>
+        </div>
+        <div class="setting-actions">
+          <button id="teach-record" class="hud-btn primary" type="button">Record</button>
+          <button id="teach-redo" class="hud-btn" type="button">Redo last</button>
+          <button id="teach-cancel" class="hud-btn" type="button">Cancel</button>
+          <button id="teach-done" class="hud-btn primary" type="button" hidden>Done</button>
+        </div>
+      </section>
+    </div>
+  </div>
 
   <script src="screen.js"></script>
 </body>
