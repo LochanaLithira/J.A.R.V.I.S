@@ -490,7 +490,12 @@ class StrictCheck:
 # refused you about 1% of the time when quiet, ~10% in noise; 4 s commands: 0.2%.
 # A looser bar (the closest 0.5% get in) refused you less but let in 10% of close-sounding people.
 # The old rule (well inside the gap, no copies) refused you about 1 in 4 times in noise.
-BAR_ABOVE_CLOSEST = 0.01          # the bar sits this far above the closest other voice
+# The shipped voices were recorded on other microphones; someone speaking into YOUR microphone
+# shares its sound and scores higher. So the bar also goes a quarter of the way from the closest
+# voice up to your own typical score: on the test that let in 0.02% of strangers and 0.5% of the
+# three closest-sounding, for ~11% refusals in noise (vs ~9%), 0.4% for 4 s commands.
+BAR_ABOVE_CLOSEST = 0.01          # the bar sits at least this far above the closest other voice
+BAR_GAP_SHARE = 0.25              # ...and at least this share of the way from it up to you
 MIN_MARGIN = 0.03                 # your own samples must clear the bar by at least this much
 BAR_LIMITS = (0.25, 0.75)
 MIN_OTHERS = 50
@@ -509,7 +514,8 @@ def calibrate(yours: list[np.ndarray], others: list[np.ndarray], copies: list[np
     """Average your samples into a voiceprint and set the bar from real people's voices.
 
     `others` are other people's voice numbers (the shipped set plus Windows' voices); the bar goes
-    just above the closest of them. `copies` are noisy versions of your samples, made
+    above the closest of them, a quarter of the way up to your own typical score. `copies` are
+    noisy versions of your samples, made
     in memory, which go into the average so it knows how you sound on a worse day.
     Each of your samples is compared with the average of the OTHER samples (leave one out), so the
     numbers show how you'll score on a new day, not how well a sample matches itself."""
@@ -528,7 +534,8 @@ def calibrate(yours: list[np.ndarray], others: list[np.ndarray], copies: list[np
     own_high = max(own)
     scores = np.array([float(normalize(o) @ centroid) for o in others])
     other_high = float(scores.max())
-    bar = max(other_high + BAR_ABOVE_CLOSEST, BAR_LIMITS[0])   # the limit only ever raises it
+    bar = max(other_high + BAR_ABOVE_CLOSEST, other_high + BAR_GAP_SHARE * (own_low - other_high),
+              BAR_LIMITS[0])                                    # the limit only ever raises it
     if bar > BAR_LIMITS[1] or own_low < bar + MIN_MARGIN:
         return Calibration(None, (own_low, own_high), other_high,
                            "Your voice and other people's voices came out too alike, so nothing was saved. "
