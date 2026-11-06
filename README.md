@@ -106,9 +106,9 @@ A changed or corrupted model is refused instead of being loaded.
 
 ## Teach J.A.R.V.I.S your voice (optional)
 
-Once taught, J.A.R.V.I.S only answers "hey jarvis" when it sounds like you, so a TV, a video or a visitor can't wake it.
+Once taught, J.A.R.V.I.S only answers "hey jarvis" when it sounds like you, so a TV, a video or a visitor can't wake it. Each spoken command is checked as well: actions that change things or show your own data run only in your voice, even in conversation mode.
 
-Open the J.A.R.V.I.S screen from the tray icon, press **Settings**, then **Teach my voice**. Press **Record**, wait for the chime and say "hey jarvis"; repeat for 20 samples at your own pace (**Redo last** retakes one, **Cancel** throws everything away). Listening pauses while you teach and comes back on its own. Each sample is turned into voice numbers straight away and its sound is dropped; only the averaged numbers and a bar are saved, in `%LOCALAPPDATA%\jarvis\voiceprint.json`. It never leaves your laptop, and the check switches on at once. **Test** shows your score; **Forget my voice** deletes it (after a Y keypress).
+Open the J.A.R.V.I.S screen from the tray icon, press **Settings**, then **Teach my voice**. Press **Record**, wait for the chime and say "hey jarvis"; repeat for 20 samples at your own pace (**Redo last** retakes one, **Cancel** throws everything away). Listening pauses while you teach and comes back on its own. Each sample is turned into voice numbers straight away and its sound is dropped (first, three noisy copies of it are made in memory, so you're still recognised with noise around or a different microphone); only the averaged numbers and a bar are saved, in `%LOCALAPPDATA%\jarvis\voiceprint.json`. It never leaves your laptop, and the check switches on at once. **Test** shows your score; **Forget my voice** deletes it (after a Y keypress).
 
 The same from a terminal (pause J.A.R.V.I.S first):
 
@@ -300,6 +300,8 @@ Tests never touch your real Documents or Downloads, and never change your real S
 J.A.R.V.I.S. is released under the [MIT License](LICENSE).
 
 The optional voice check uses the [WeSpeaker](https://github.com/wenet-e2e/wespeaker) ResNet34 model trained on [VoxCeleb](https://www.robots.ox.ac.uk/~vgg/data/voxceleb/), licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/), as packaged in ONNX form by the [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) project. The model is downloaded separately and is not part of this repository.
+
+`backend/voice/data/other_voices.npy` holds voice numbers (no audio) computed from [LibriSpeech](https://www.openslr.org/12) dev-clean and dev-other (V. Panayotov, G. Chen, D. Povey, S. Khudanpur), licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). `scripts/build_voice_cohort.py` rebuilds it.
 
 ## Security reports
 

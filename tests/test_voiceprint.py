@@ -145,28 +145,59 @@ def test_delete_forgets_file_and_fingerprint(tmp_path):
 
 # ---- choosing the bar ----------------------------------------------------------------------------
 
-def test_calibration_puts_the_bar_between_you_and_others():
-    result = calibrate([like_me() for _ in range(20)], [someone_else() for _ in range(12)])
+def people(n=200, near=0.0):
+    """Other people's voice numbers; `near` pulls them towards your voice."""
+    return [normalize(near * ME + someone_else()) for _ in range(n)]
+
+
+def test_the_bar_sits_just_above_the_closest_other_voice():
+    others = people(400, near=0.6)                                # strangers who sound a bit like you
+    result = calibrate([like_me() for _ in range(20)], others)
     vp = result.voiceprint
-    assert vp is not None and result.others < vp.threshold < result.yours[0]
-    assert vpm.similarity(like_me(), np.array(vp.centroid)) >= vp.threshold
-    assert all(vpm.similarity(someone_else(), np.array(vp.centroid)) < vp.threshold for _ in range(50))
+    assert vp is not None and vp.threshold < result.yours[0] and result.bar == vp.threshold
+    centroid = np.array(vp.centroid)
+    assert all(vpm.similarity(o, centroid) < vp.threshold for o in others)        # none of them get in
+    assert vp.threshold == pytest.approx(result.others + vpm.BAR_ABOVE_CLOSEST)
+    assert vpm.similarity(like_me(), centroid) >= vp.threshold
+
+
+def test_the_upper_limit_never_pulls_the_bar_below_other_people():
+    others = people(200, near=8.0)                               # strangers score ~0.99
+    result = calibrate([unit(ME + rng.normal(scale=0.001, size=256)) for _ in range(20)], others)
+    assert result.voiceprint is None
 
 
 def test_too_alike_saves_nothing():
-    others = [like_me() for _ in range(5)]                       # "other voices" sound just like you
+    others = [like_me() for _ in range(60)]                      # "other voices" sound just like you
     result = calibrate([like_me() for _ in range(20)], others)
     assert result.voiceprint is None and "too alike" in result.message
 
 
-def test_calibration_needs_enough_samples():
+def test_calibration_needs_enough_samples_and_other_people():
     with pytest.raises(VoiceprintError):
-        calibrate([like_me() for _ in range(3)], [])
+        calibrate([like_me() for _ in range(3)], people())
+    with pytest.raises(VoiceprintError, match="other voices"):
+        calibrate([like_me() for _ in range(20)], people(10))
 
 
 def test_the_bar_stays_within_limits():
-    result = calibrate([like_me(spread=0.01) for _ in range(20)], [])
+    result = calibrate([like_me(spread=0.01) for _ in range(20)], people())
     assert vpm.BAR_LIMITS[0] <= result.voiceprint.threshold <= vpm.BAR_LIMITS[1]
+
+
+def test_noisy_copies_go_into_your_average():
+    yours = [like_me() for _ in range(20)]
+    shifted = normalize(ME + 0.5 * someone_else())
+    plain = calibrate(yours, people()).voiceprint
+    with_copies = calibrate(yours, people(), copies=[shifted] * 20).voiceprint
+    assert vpm.similarity(shifted, np.array(with_copies.centroid)) > vpm.similarity(shifted, np.array(plain.centroid))
+
+
+def test_an_old_voiceprint_must_be_taught_again():
+    data = json.loads(a_voiceprint().to_json())
+    data["version"] = 1
+    with pytest.raises(VoiceprintError, match="again"):
+        Voiceprint.from_json(json.dumps(data))
 
 
 # ---- the checks ------------------------------------------------------------------------------------
@@ -286,31 +317,133 @@ def test_collect_gives_up_after_too_many_tries():
     assert kept == []
 
 
+class Mixed:
+    """Your samples (and their noisy copies) sound like you; Windows' 2 s voices don't."""
+
+    def __init__(self):
+        self.lengths = []
+
+    def embed(self, samples):
+        self.lengths.append(len(samples))
+        return someone_else() if len(samples) == 32000 else like_me()
+
+
 def test_teach_saves_only_a_good_voiceprint():
     saved = []
     others = lambda: [("David", np.zeros(32000, np.int16))] * 6
-    model = FakeModel(like_me)
-    model_other = FakeModel(someone_else)
-
-    class Mixed:                               # your samples sound like you; Windows' voices don't
-        def __init__(self):
-            self.calls = 0
-
-        def embed(self, samples):
-            self.calls += 1
-            return model.embed(samples) if self.calls <= 20 else model_other.embed(samples)
-
-    result = enroll.teach(wake_moments(*[chunks(1.7)] * 20), Mixed(), voices=others,
-                          say=lambda s: None, save=saved.append)
+    model = Mixed()
+    result = enroll.teach(wake_moments(*[chunks(1.7)] * 20), model, voices=others,
+                          say=lambda s: None, save=saved.append, cohort=lambda: np.array(people()))
     assert result.voiceprint is not None and saved == [result.voiceprint]
+    assert len(model.lengths) == 20 * 4 + 6          # each sample, its 3 noisy copies, Windows' voices
 
 
 def test_teach_with_too_few_samples_saves_nothing():
     saved = []
     with pytest.raises(VoiceprintError):
         enroll.teach(wake_moments(*[chunks(1.7)] * 5), FakeModel(like_me), voices=lambda: [],
-                     say=lambda s: None, save=saved.append)
+                     say=lambda s: None, save=saved.append, cohort=lambda: np.array(people()))
     assert saved == []
+
+
+def test_teach_checks_the_comparison_voices_before_you_start():
+    def broken():
+        raise VoiceprintError("The comparison voices have changed, so they were refused.")
+
+    heard = []
+    with pytest.raises(VoiceprintError, match="comparison"):
+        enroll.teach(lambda: heard.append(1), FakeModel(like_me), voices=lambda: [], say=lambda s: None,
+                     cohort=broken)
+    assert heard == []
+
+
+# ---- the comparison voices that ship with J.A.R.V.I.S ------------------------------------------------------
+
+def test_the_shipped_comparison_voices_load_and_match_their_fingerprint():
+    people_ = vpm.load_cohort()
+    assert people_.shape[1] == 256 and vpm.COHORT_ROWS[0] <= len(people_) <= vpm.COHORT_ROWS[1]
+    assert np.allclose(np.linalg.norm(people_, axis=1), 1.0)
+
+
+def test_changed_comparison_voices_are_refused_before_being_read(tmp_path):
+    path = tmp_path / "other_voices.npy"
+    np.save(path, np.zeros((200, 256), np.float32))
+    with pytest.raises(VoiceprintError, match="changed"):
+        vpm.load_cohort(path)
+    with pytest.raises(VoiceprintError, match="missing"):
+        vpm.load_cohort(tmp_path / "nothing.npy")
+
+
+# ---- only the speech is compared ----------------------------------------------------------------------------
+
+class FakeVad:
+    """Says 'speech' for frames louder than a whisper."""
+
+    def __init__(self):
+        self.resets = 0
+
+    def reset(self):
+        self.resets += 1
+
+    def __call__(self, frame):
+        return 1.0 if np.abs(frame).mean() > 100 else 0.0
+
+
+def test_silence_around_the_words_is_dropped():
+    talk = np.full(16000, 3000, np.int16)
+    audio = np.concatenate([np.zeros(16000, np.int16), talk, np.zeros(8000, np.int16)])
+    vad = FakeVad()
+    kept = vpm.speech_only(audio, vad)
+    assert 16000 <= len(kept) <= 16000 + 4 * vpm.VAD_FRAME and vad.resets == 1    # frame edges + one each side
+    assert np.abs(kept).mean() > 2500
+
+
+def test_when_too_little_is_speech_everything_is_kept():
+    audio = np.concatenate([np.zeros(16000, np.int16), np.full(2000, 3000, np.int16)])
+    assert len(vpm.speech_only(audio, FakeVad())) == len(audio)
+    assert len(vpm.speech_only(audio, None)) == len(audio)
+
+
+@pytest.mark.parametrize("kind", ["noise", "chatter", "phone", "something else"])
+def test_noisy_copies_are_made_in_memory_and_keep_the_length(kind, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    audio = (np.sin(np.arange(24000) / 7) * 5000).astype(np.int16)
+    out = vpm.noisy_copy(audio, kind, np.random.default_rng(0), [np.full(8000, 900, np.int16)] * 3)
+    assert out.dtype == np.int16 and len(out) == len(audio)
+    assert list(tmp_path.iterdir()) == []                        # nothing written anywhere
+    if kind in ("noise", "chatter", "phone"):
+        assert not np.array_equal(out, audio)
+
+
+# ---- the second check, on the command itself -------------------------------------------------------------------
+
+def test_a_command_in_your_voice_passes_and_others_do_not():
+    audio = np.full(16000 * 3, 3000, np.int16)
+    assert SpeakerCheck(FakeModel(like_me), a_voiceprint(), vad=FakeVad()).judge(audio)[0] == "you"
+    said, score = SpeakerCheck(FakeModel(someone_else), a_voiceprint(), vad=FakeVad()).judge(audio)
+    assert said == "not you" and isinstance(score, float)
+
+
+def test_too_little_speech_in_a_command_is_unsure():
+    audio = np.full(4000, 3000, np.int16)                        # a quarter of a second
+    assert SpeakerCheck(FakeModel(like_me), a_voiceprint()).judge(audio) == ("unsure", None)
+
+
+def test_only_the_start_of_a_long_command_is_checked():
+    model = FakeModel(like_me)
+    SpeakerCheck(model, a_voiceprint()).judge(np.full(16000 * 14, 3000, np.int16))
+    assert model.lengths == [int(vpm.COMMAND_SECONDS * 16000)]
+
+
+def test_command_judge_finds_your_check_among_the_wake_checks():
+    speaker = SpeakerCheck(FakeModel(like_me), a_voiceprint())
+    assert vpm.command_judge(AllChecks([("no voice", lambda c: True), ("not your voice", speaker)])) == speaker.judge
+    assert vpm.command_judge(AllChecks([("no voice", lambda c: True)])) is None
+    assert vpm.command_judge(None) is None
+
+
+def test_a_strict_check_without_a_model_refuses_commands_too():
+    assert StrictCheck(None).judge(np.full(48000, 3000, np.int16)) == ("not you", None)
 
 
 # ---- starting up -----------------------------------------------------------------------------------------
@@ -441,3 +574,12 @@ def test_speaking_during_the_warm_up_does_not_count(models_dir, spoken):
     mic = FakeMic(np.concatenate([spoken["wake"], np.zeros((enroll.LISTEN_CHUNKS + 30) * CHUNK, np.int16)]))
     triggers = Triggers(WakeWordDetector(models_dir), None, config.WAKE_THRESHOLD, config.WAKE_PATIENCE)
     assert enroll._wake_listener(mic, triggers, chime=lambda: None)() is None
+
+
+def test_a_wake_in_your_voice_is_audited_with_your_score():
+    audit = Audit()
+    check = AllChecks([("not your voice", SpeakerCheck(FakeModel(like_me), a_voiceprint()))])
+    t = Triggers(LoudWake(), None, audit=audit, voice_check=check)
+    assert any(t.process(c) for c in chunks(2.0))
+    event, fields = audit.rows[-1]
+    assert event == "wake" and isinstance(fields["voice_score"], float)

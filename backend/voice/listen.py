@@ -23,6 +23,7 @@ from __future__ import annotations
 import io
 import json
 import re
+import threading
 import wave
 from dataclasses import dataclass
 from pathlib import Path
@@ -330,6 +331,7 @@ class Heard:
     text: str = ""                    # what you said ("" if nothing usable)
     reason: str = ""                  # why recording stopped
     error: str = ""                   # a safe message if something failed
+    voice: str | None = None          # whose voice it was: None (no check), "you", "not you", "unsure"
 
 
 # Words a sentence doesn't end on: "open the...", "make a note called...", "um...".
@@ -362,10 +364,42 @@ class SpeechInput:
     keeps listening that much longer for the rest, and the two parts are joined."""
 
     def __init__(self, recorder: CommandRecorder, transcriber: GroqTranscriber, audit: Any = None,
-                 on_recorded: Callable[[], None] | None = None, unfinished_extra_seconds: float = 0.0):
+                 on_recorded: Callable[[], None] | None = None, unfinished_extra_seconds: float = 0.0,
+                 voice_judge: Callable[[np.ndarray], tuple[str, float | None]] | None = None):
         self._recorder, self._transcriber, self._audit = recorder, transcriber, audit
         self.on_recorded = on_recorded          # the "got it" tone: you can stop talking
         self.unfinished_extra = max(0.0, unfinished_extra_seconds)
+        # Your voice check for the command itself: audio -> ("you" / "not you" / "unsure", score).
+        # Runs on this laptop while the words are being turned into text, so it adds no wait.
+        self.voice_judge = voice_judge
+
+    def _judge(self, audio: np.ndarray) -> Callable[[], str | None]:
+        """Start the voice check on the command; the returned function waits for its verdict."""
+        judge = self.voice_judge
+        if judge is None:
+            return lambda: None
+        box: dict[str, Any] = {}
+
+        def run() -> None:
+            try:
+                box["v"] = judge(audio)
+            except Exception:
+                box["v"] = ("unsure", None)      # a broken check never counts as you
+
+        worker = threading.Thread(target=run, name="jarvis-command-voice", daemon=True)
+        worker.start()
+
+        def verdict() -> str | None:
+            worker.join(10)
+            said, score = box.get("v", ("unsure", None))
+            said = said if said in ("you", "not you", "unsure") else "unsure"
+            fields = {"voice": said}
+            if isinstance(score, float):
+                fields["voice_score"] = round(score, 3)   # a number, never sound
+            self._record("command_voice", **fields)
+            return said
+
+        return verdict
 
     def _record(self, event: str, **fields: Any) -> None:
         if self._audit is not None:
@@ -399,13 +433,15 @@ class SpeechInput:
         early = self.unfinished_extra <= 0      # without the check, the tone comes before the upload
         if early:
             self._tone()
+        verdict = self._judge(rec.audio)
         text, error = self._upload(rec)
+        voice = verdict()
         if error:
-            return Heard(reason=rec.reason, error=error)
+            return Heard(reason=rec.reason, error=error, voice=voice)
         if not text:                            # only noise, or words Whisper was guessing: run nothing
             if not early:
                 self._tone()
-            return Heard(reason="noise")
+            return Heard(reason="noise", voice=voice)
         if not early and rec.reason == "done" and sounds_unfinished(text):
             remaining = self._recorder.max_seconds - len(rec.audio) / SAMPLE_RATE
             if remaining >= 1.0:
@@ -417,4 +453,4 @@ class SpeechInput:
                         text = _join(text, rest)
         if not early:
             self._tone()
-        return Heard(text=text, reason=rec.reason)
+        return Heard(text=text, reason=rec.reason, voice=voice)
