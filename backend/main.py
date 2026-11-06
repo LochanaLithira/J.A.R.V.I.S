@@ -49,7 +49,7 @@ from .voice.style import Style
 from .voice.triggers import (ALARM_CHIME, CHUNK, SAMPLE_RATE, ClapDetector, Microphone, TriggerError, Triggers,
                              WakeEvent, WakeWordDetector, pick_microphone, play_chime, play_close_chime,
                              play_done_chime)
-from .voice.voiceprint import (AllChecks, SpeakerCheck, SpeakerModel, StrictCheck, VoiceprintError,
+from .voice.voiceprint import (AllChecks, SpeakerCheck, SpeakerModel, StrictCheck, VoiceprintError, command_judge,
                                load_voiceprint)
 
 log = logging.getLogger("jarvis")
@@ -243,6 +243,8 @@ class Assistant:
                  style: Style | None = None,
                  retry_seconds: float = RETRY_SECONDS, mic_idle_seconds: float = MIC_IDLE_SECONDS):
         self._triggers, self._speech, self._get_flow, self._voice = triggers, speech, get_flow, voice
+        if speech is not None and getattr(speech, "voice_judge", "absent") is None:
+            speech.voice_judge = command_judge(getattr(triggers, "_voice_check", None))
         self._warm = warm                     # reconnect to the cloud services while you speak
         self._follow_on_question = follow_up_on_question
         self._follow_seconds, self._follow_max = follow_up_seconds, follow_up_max_turns
@@ -304,8 +306,11 @@ class Assistant:
         return getattr(self._triggers, "_voice_check", None)
 
     def set_voice_check(self, check: Any) -> None:
-        """Swap the wake-up checks (e.g. your voice check just switched on), without a restart."""
+        """Swap the wake-up checks (e.g. your voice check just switched on), without a restart.
+        Your commands are then checked with the same voiceprint."""
         self._triggers.set_voice_check(check)
+        if self._speech is not None and hasattr(self._speech, "voice_judge"):
+            self._speech.voice_judge = command_judge(check)
 
     def announce(self, label: str) -> None:
         """A timer finished (called from the timer thread). Handled by the loop within ~0.1 s."""
@@ -544,7 +549,7 @@ class Assistant:
         elif is_stop_phrase(heard.text):
             self._goodbye()                      # "hey jarvis... never mind"
         elif heard.text:
-            act_s, voice_s, result = self._act(heard.text)
+            act_s, voice_s, result = self._act(heard.text, voice=heard.voice)
             # durations only, never words: shows where the time goes
             log.info("timing: listening and hearing %.1fs, AI and action %.1fs, voice %.1fs",
                      heard_s, act_s, voice_s)
@@ -618,7 +623,7 @@ class Assistant:
             if is_stop_phrase(heard.text):
                 self._goodbye()
                 return
-            _, _, result = self._act(heard.text, tuple(memory))
+            _, _, result = self._act(heard.text, tuple(memory), voice=heard.voice)
             turn = self._turn(heard.text, result)
             if turn is not None:
                 memory.append(turn)
@@ -639,9 +644,10 @@ class Assistant:
         else:
             self._emit("nothing", reason=heard.reason)
 
-    def _act(self, text: str, history: tuple[Turn, ...] = ()) -> tuple[float, float, Any]:
+    def _act(self, text: str, history: tuple[Turn, ...] = (), voice: str | None = None) -> tuple[float, float, Any]:
         """Run a heard command like say. Returns (seconds for AI and action, seconds speaking,
-        the result, or None if nothing ran)."""
+        the result, or None if nothing ran). `voice` is the voice check's verdict on the command:
+        actions that change things or show your data need it to be "you" (the gate decides)."""
         t0 = time.monotonic()
         if self._get_flow is None:
             self._say_out("NO: The AI is not set up.")
@@ -650,7 +656,8 @@ class Assistant:
         self._emit("thinking")
         try:
             flow = self._get_flow()
-            result = flow.run(text, history) if history else flow.run(text)
+            extra = {"voice": voice} if voice is not None else {}
+            result = flow.run(text, history, **extra) if history else flow.run(text, **extra)
         except (BrainError, CredentialError, FlowError) as exc:
             self._say_out(f"NO: {exc}")
             self._notice(str(exc))
@@ -678,8 +685,18 @@ class Assistant:
         return t1 - t0, time.monotonic() - t1, result
 
 
+def _speech_trimmer() -> Any:
+    """Silero VAD for the voice check, so only the part where you speak is compared."""
+    try:
+        return SileroVAD(config.MODELS_DIR)
+    except Exception as exc:
+        log.error("voice check speech trimmer unavailable: %s", type(exc).__name__)
+        return None
+
+
 def make_speaker_check(get: Callable[[str], str | None] = get_secret,
-                       model_factory: Callable[[Any], Any] = SpeakerModel) -> tuple[Callable | None, str]:
+                       model_factory: Callable[[Any], Any] = SpeakerModel,
+                       vad_factory: Callable[[], Any] = _speech_trimmer) -> tuple[Callable | None, str]:
     """Your voice check, if you have taught J.A.R.V.I.S your voice: (check or None, problem text).
 
     A changed voiceprint or a missing model is never ignored silently: the problem is reported,
@@ -690,7 +707,7 @@ def make_speaker_check(get: Callable[[str], str | None] = get_secret,
         voiceprint = load_voiceprint(config.VOICEPRINT, get)
         if voiceprint is None:
             return None, ""                          # not taught yet: nothing to check
-        check = SpeakerCheck(model_factory(config.MODELS_DIR), voiceprint)
+        check = SpeakerCheck(model_factory(config.MODELS_DIR), voiceprint, vad=vad_factory())
         return (StrictCheck(check) if config.VOICE_CHECK_STRICT else check), ""
     except VoiceprintError as exc:
         problem = str(exc)
@@ -712,11 +729,20 @@ def make_voice_settings(get_assistant: Callable[[], Any], screen: Any, confirm: 
     from .voice.teaching import TeachingSession
 
     def make_session(save, pause_listening, on_update, current):
-        return TeachingSession(screen_prepare(on_level=lambda chunk: screen.set_level(sound_level(chunk))),
-                               other_voices, save, pause_listening, on_update, current=current)
+        made: list = []
+
+        def voices() -> list:
+            """Windows' voices, made once per session in memory (for chatter copies and comparing)."""
+            if not made:
+                made.append(other_voices())
+            return made[0]
+
+        return TeachingSession(screen_prepare(on_level=lambda chunk: screen.set_level(sound_level(chunk)),
+                                              voices=voices),
+                               voices, save, pause_listening, on_update, current=current)
 
     settings = VoiceSettings(get_assistant, screen.teach, screen.set_voice, confirm, get_secret, set_secret,
-                             delete_secret, make_session, model_factory=SpeakerModel)
+                             delete_secret, make_session, model_factory=SpeakerModel, vad_factory=_speech_trimmer)
 
     def watch() -> None:
         while True:

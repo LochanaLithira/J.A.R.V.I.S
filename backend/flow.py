@@ -35,6 +35,7 @@ class FlowError(Exception):
 class _State(TypedDict, total=False):
     command: Any
     history: tuple
+    voice: Any
     reply: BrainReply
     result: Result
 
@@ -68,10 +69,11 @@ class Flow:
         graph.add_edge("guard", END)
         return graph.compile()              # no checkpointer: nothing is persisted
 
-    def run(self, command: Any, history: tuple[Turn, ...] = ()) -> Result:
+    def run(self, command: Any, history: tuple[Turn, ...] = (), voice: str | None = None) -> Result:
         """Take one command through the whole flow and return what to tell the user. `history`
-        is the one earlier exchange, used only when you are answering J.A.R.V.I.S's question."""
-        return self._graph.invoke({"command": command, "history": tuple(history)})["result"]
+        is the one earlier exchange, used only when you are answering J.A.R.V.I.S's question.
+        `voice` is the voice check's verdict on who said it; the AI never sees or sets it."""
+        return self._graph.invoke({"command": command, "history": tuple(history), "voice": voice})["result"]
 
     # ---- nodes ----------------------------------------------------------------
     def _ai_rate_limited(self) -> bool:
@@ -115,7 +117,9 @@ class Flow:
 
     def _guard(self, state: _State) -> dict[str, Any]:
         proposal = state["reply"].proposal
-        result = self._gate.execute(proposal.tool, proposal.args)
+        voice = state.get("voice")
+        result = (self._gate.execute(proposal.tool, proposal.args) if voice is None
+                  else self._gate.execute(proposal.tool, proposal.args, voice=voice))
         # Remember what the AI proposed (its own words), never what the tool returned.
         action = {"tool": proposal.tool, "args": dict(proposal.args) if isinstance(proposal.args, dict) else {}}
         return {"result": replace(result, action=action)}

@@ -10,7 +10,8 @@ from backend import config
 from backend.settings import COMMANDS, VoiceSettings
 from backend.voice.teaching import TeachingSession
 from backend.voice.triggers import CHUNK
-from backend.voice.voiceprint import Voiceprint, VoiceprintError, load_voiceprint, normalize, save_voiceprint
+from backend.voice.voiceprint import (CHECK_SECONDS, Voiceprint, VoiceprintError, load_voiceprint, normalize,
+                                      save_voiceprint)
 
 rng = np.random.default_rng(3)
 ME = normalize(rng.normal(size=256))
@@ -40,8 +41,10 @@ def wait_for(cond, timeout=5):
 class Harness:
     """A teaching session with a fake microphone: each Record press hears whatever `heard` holds."""
 
-    def __init__(self, voice=like_me, heard=moment, prepare_error=None, others=None, current=None):
+    def __init__(self, voice=like_me, heard=moment, prepare_error=None, others=None, current=None,
+                 cohort=None, copies=True):
         self.updates, self.paused, self.saved, self.sounds_seen = [], [], [], []
+        self.copy_calls = []
         self.voice, self.heard = voice, heard
         self.release = threading.Event()
         self.release.set()
@@ -57,14 +60,23 @@ class Harness:
             self.release.wait(5)
             return None if stop.is_set() else self.heard()
 
+        def make_copies(samples):
+            self.copy_calls.append(len(samples))
+            return [like_me(), like_me()]
+
         def prepare():
             if prepare_error:
                 raise prepare_error
-            return embed, listen
+            return (embed, listen, make_copies) if copies else (embed, listen)
+
+        def people():
+            if isinstance(cohort, Exception):
+                raise cohort
+            return cohort if cohort is not None else np.array([someone_else() for _ in range(120)])
 
         others = others if others is not None else [("David", np.zeros(32000, np.int16))] * 4
         self.session = TeachingSession(prepare, lambda: others, self.saved.append, self.paused.append,
-                                       self.updates.append, current=current)
+                                       self.updates.append, current=current, cohort=people)
 
     def phase(self):
         return self.updates[-1]["phase"] if self.updates else None
@@ -123,7 +135,42 @@ def test_twenty_samples_save_and_switch_back_on():
     final = h.updates[-1]
     assert final["saved"] is True and isinstance(final["bar"], float) and len(h.saved) == 1
     assert h.paused == [True, False] and not h.session.active
-    assert all(n <= int(1.5 * 16000) for n in h.sounds_seen)
+    assert all(n <= int(CHECK_SECONDS * 16000) for n in h.sounds_seen)
+    assert len(h.copy_calls) == 20                       # every kept sample got its noisy copies
+    assert h.session._kept == [] and h.session._kept_copies == []
+
+
+def test_redo_drops_that_samples_copies_too():
+    h = Harness()
+    h.session.start()
+    h.wait_phase("waiting")
+    for _ in range(2):
+        h.record()
+        assert wait_for(lambda: h.phase() == "waiting" and not h.session._busy)
+    assert len(h.session._kept_copies) == 2
+    assert h.session.redo()
+    assert len(h.session._kept) == len(h.session._kept_copies) == 1
+
+
+def test_without_copies_teaching_still_works():
+    h = Harness(copies=False)
+    h.session.start()
+    h.wait_phase("waiting")
+    for _ in range(19):
+        h.record()
+        assert wait_for(lambda: h.phase() == "waiting" and not h.session._busy)
+    voices = iter([like_me()] + [someone_else() for _ in range(10)])   # your 20th, then Windows' voices
+    h.voice = lambda: next(voices)
+    h.record()
+    h.wait_phase("result")
+    assert h.updates[-1]["saved"] is True
+
+
+def test_missing_comparison_voices_stop_teaching_before_you_start():
+    h = Harness(cohort=VoiceprintError("The comparison voices are missing. Reinstall J.A.R.V.I.S."))
+    h.session.start()
+    h.wait_phase("failed")
+    assert "comparison voices" in h.updates[-1]["message"] and h.paused == [True, False]
 
 
 def test_a_miss_or_an_odd_sample_is_retaken():

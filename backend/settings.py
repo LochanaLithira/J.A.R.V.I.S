@@ -32,8 +32,9 @@ class VoiceSettings:
                  show_voice: Callable[[dict], None], confirm: Callable[[str, dict], bool],
                  get_secret: Callable, set_secret: Callable, delete_secret: Callable,
                  make_session: Callable[..., Any], model_factory: Callable[[Any], Any] | None = None,
-                 voices: Callable[[], list] | None = None):
+                 voices: Callable[[], list] | None = None, vad_factory: Callable[[], Any] | None = None):
         self._assistant, self._show_teach, self._show_voice = get_assistant, show_teach, show_voice
+        self._vad_factory = vad_factory
         self._confirm = confirm
         self._get, self._set, self._delete = get_secret, set_secret, delete_secret
         self._make_session, self._model_factory, self._voices = make_session, model_factory, voices
@@ -112,7 +113,8 @@ class VoiceSettings:
         """Save a newly taught voiceprint and switch the check on straight away."""
         save_voiceprint(voiceprint, config.VOICEPRINT, self._set)
         if config.VOICE_CHECK and self._model_factory is not None:
-            check = SpeakerCheck(self._model_factory(config.MODELS_DIR), voiceprint)
+            vad = self._vad_factory() if self._vad_factory is not None else None
+            check = SpeakerCheck(self._model_factory(config.MODELS_DIR), voiceprint, vad=vad)
             self._swap_check(StrictCheck(check) if config.VOICE_CHECK_STRICT else check)
         self._voice_status()
 

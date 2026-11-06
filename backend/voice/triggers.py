@@ -289,7 +289,7 @@ class Triggers:
     That audio is kept in memory only, and only for those 2 seconds."""
 
     MUTE_TAIL_SECONDS = 1.0            # stay deaf this long after speech ends (echo, room reverb)
-    RECENT_CHUNKS = 24                 # about 2 seconds of audio, in memory only, for the voice check
+    RECENT_CHUNKS = 30                 # about 2.4 seconds of audio, in memory only, for the voice check
     REJECT_PAUSE_SECONDS = 1.0         # after a rejected wake-up, don't check again for a moment
 
     def __init__(self, wake: WakeWordDetector | None = None, clap: ClapDetector | None = None,
@@ -381,7 +381,11 @@ class Triggers:
         self._last_wake = now
         self._above = 0
         if self._audit is not None:
-            self._audit.record("wake", source=event.source, score=event.score)
+            extra = {}
+            voice_score = getattr(self._voice_check, "score", None) if event.source == "hey jarvis" else None
+            if isinstance(voice_score, float):
+                extra["voice_score"] = round(voice_score, 3)          # a number, never sound
+            self._audit.record("wake", source=event.source, score=event.score, **extra)
         return event
 
 
