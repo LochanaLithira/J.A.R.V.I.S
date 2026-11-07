@@ -4,6 +4,26 @@ A security-focused, voice-enabled personal assistant for Windows. J.A.R.V.I.S. t
 
 > **Development status:** This project is under active development and is currently designed for Windows.
 
+## Quick start
+
+1. Install **Python 3.14 (64-bit)** from [python.org](https://www.python.org/downloads/windows/). Keep "tcl/tk" ticked; J.A.R.V.I.S. uses it for its popups.
+2. Get the project, either:
+   - with git:
+     ```powershell
+     git clone -b dev https://github.com/LochanaLithira/J.A.R.V.I.S.git
+     cd J.A.R.V.I.S
+     ```
+   - or without git: on GitHub, switch to the `dev` branch, choose **Code > Download ZIP**, and unzip it.
+3. Double-click **`start.bat`** in the project folder. The first time, it runs `setup.ps1`, which creates the project's own Python environment (`.venv`) and installs the exact packages in `requirements.txt`, each one checked against its fingerprint. This takes a few minutes. Then J.A.R.V.I.S. starts and its screen opens on the [setup guide](#set-up-on-the-screen-easiest) for your keys, models, microphone and voice.
+
+After that, `start.bat` simply starts J.A.R.V.I.S. (or turn on "Start with Windows" in the guide). To update, run `git pull` (or download the ZIP again), then run `setup.ps1` once more to bring the packages up to date:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File setup.ps1
+```
+
+Neither script needs administrator rights or changes any system setting. Everything is installed inside the project folder. The manual steps below do the same jobs.
+
 ## Highlights
 
 - **Gemini-powered command understanding** using Google's Gemini API.
@@ -26,17 +46,17 @@ A security-focused, voice-enabled personal assistant for Windows. J.A.R.V.I.S. t
 ## Requirements
 
 - Windows with access to a microphone and speakers.
-- Python 3.11 or newer recommended (developed and tested on Python 3.14).
+- Python 3.14 (64-bit, the normal build, with tcl/tk). `requirements.txt` is pinned for 3.14.
 - Microsoft Edge WebView2 for the on-demand screen (already included in Windows 11).
 - API keys for the cloud services you plan to use:
   - Google Gemini for typed commands and AI suggestions.
   - Groq Whisper for speech-to-text.
   - Fish Audio for optional spoken replies.
-- A working audio input device. The default configuration expects a microphone containing `Microphone Array` in its name; update `MIC_DEVICE` in `backend/config.py` if necessary.
+- A working audio input device. Pick it in the setup guide (otherwise the microphone named by `MIC_DEVICE` in `backend/config.py` is used).
 
 ## Installation
 
-Clone the repository and switch to the development branch:
+The [Quick start](#quick-start) does all of this for you. To do it by hand, clone the repository and switch to the development branch:
 
 ```powershell
 git clone https://github.com/LochanaLithira/J.A.R.V.I.S.git
@@ -297,6 +317,8 @@ Tests never touch your real Documents or Downloads, and never change your real S
 │   └── screen/           # The screen itself: HTML, CSS and JavaScript
 ├── scripts/               # Setup utilities (autostart)
 ├── tests/                 # Automated tests
+├── setup.ps1              # One-step setup after cloning (.venv + fingerprinted packages)
+├── start.bat              # Double-click to start (runs setup the first time)
 ├── requirements.in        # Runtime dependency inputs
 ├── requirements-dev.in    # Development dependency inputs
 ├── SECURITY.md            # Security model, threat model, and reporting
