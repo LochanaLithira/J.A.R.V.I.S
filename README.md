@@ -4,6 +4,26 @@ A security-focused, voice-enabled personal assistant for Windows. J.A.R.V.I.S. t
 
 > **Development status:** This project is under active development and is currently designed for Windows.
 
+## Quick start
+
+1. Install **Python 3.14 (64-bit)** from [python.org](https://www.python.org/downloads/windows/). Keep "tcl/tk" ticked; J.A.R.V.I.S. uses it for its popups.
+2. Get the project, either:
+   - with git:
+     ```powershell
+     git clone https://github.com/LochanaLithira/J.A.R.V.I.S.git
+     cd J.A.R.V.I.S
+     ```
+   - or without git: on the project's GitHub page, choose **Code > Download ZIP** and unzip it.
+3. Double-click **`start.bat`** in the project folder. The first time, it runs `setup.ps1`, which creates the project's own Python environment (`.venv`) and installs the exact packages in `requirements.txt`, each one checked against its fingerprint. This takes a few minutes. Then J.A.R.V.I.S. starts and its screen opens on the [setup guide](#set-up-on-the-screen-easiest) for your keys, models, microphone and voice.
+
+After that, `start.bat` simply starts J.A.R.V.I.S. (or turn on "Start with Windows" in the guide). To update, run `git pull` (or download the ZIP again), then run `setup.ps1` once more to bring the packages up to date:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File setup.ps1
+```
+
+Neither script needs administrator rights or changes any system setting. Everything is installed inside the project folder. The manual steps below do the same jobs.
+
 ## Highlights
 
 - **Gemini-powered command understanding** using Google's Gemini API.
@@ -16,7 +36,8 @@ A security-focused, voice-enabled personal assistant for Windows. J.A.R.V.I.S. t
 - **Runs in the background** with a tray icon, and an on-demand futuristic screen showing live status, the conversation, timers and activity.
 - **Smart follow-ups:** when J.A.R.V.I.S. asks you a question, answer without saying the wake word again.
 - **Safety gate for every action:** the AI can suggest an action, but it cannot execute tools directly.
-- **Approved tools only:** notes, configured Windows applications, file tools limited to named folders, and timers are registered explicitly.
+- **Approved tools only:** notes, opening apps from your Start menu, PC controls (volume, media, brightness, battery, CPU, lock), switching and closing windows, file tools limited to named folders, and timers are registered explicitly.
+- **No command lines, ever:** "open app" refuses terminals, PowerShell, script hosts, the Registry Editor, admin tools and uninstallers, judged by the real program behind each shortcut.
 - **Confirmation for risky actions** and rate limiting for AI requests.
 - **Tamper-evident audit logging** stored outside the writable workspace.
 - **Credential protection** through Windows Credential Manager via `keyring`.
@@ -25,23 +46,24 @@ A security-focused, voice-enabled personal assistant for Windows. J.A.R.V.I.S. t
 ## Requirements
 
 - Windows with access to a microphone and speakers.
-- Python 3.11 or newer recommended (developed and tested on Python 3.14).
+- Python 3.14 (64-bit, the normal build, with tcl/tk). `requirements.txt` is pinned for 3.14.
 - Microsoft Edge WebView2 for the on-demand screen (already included in Windows 11).
 - API keys for the cloud services you plan to use:
   - Google Gemini for typed commands and AI suggestions.
   - Groq Whisper for speech-to-text.
   - Fish Audio for optional spoken replies.
-- A working audio input device. The default configuration expects a microphone containing `Microphone Array` in its name; update `MIC_DEVICE` in `backend/config.py` if necessary.
+- A working audio input device. Pick it in the setup guide (otherwise the microphone named by `MIC_DEVICE` in `backend/config.py` is used).
 
 ## Installation
 
-Clone the repository and switch to the development branch:
+The [Quick start](#quick-start) does all of this for you. To do it by hand, clone the repository:
 
 ```powershell
 git clone https://github.com/LochanaLithira/J.A.R.V.I.S.git
 cd J.A.R.V.I.S
-git checkout dev
 ```
+
+`main` is the released version. Work in progress lives on `dev` (`git checkout dev`).
 
 Create and activate a virtual environment:
 
@@ -59,6 +81,18 @@ python -m pip install -r requirements-dev.txt
 ```
 
 If the generated requirements files are unavailable, install from the input files with your preferred dependency compiler, or install the packages listed in `requirements.in` and `requirements-dev.in`.
+
+## Set up on the screen (easiest)
+
+Start J.A.R.V.I.S. (see [Run J.A.R.V.I.S. in the background](#run-jarvis-in-the-background)). The first time, its screen opens on a setup guide that walks you through:
+
+1. **Keys**: "Get a free key" opens the sign-up page for Gemini, Groq or Fish Audio. "Add key" opens a small separate window where you paste the key. It is shown as dots and saved straight into Windows Credential Manager; it never passes through the screen. "Test my keys" makes one read-only call to Gemini and Groq and has Fish Audio say a short line.
+2. **Models**: one button downloads them, and each file is checked against its fingerprint.
+3. **Microphone**: pick one from the list and test it. The test only measures loudness; nothing is recorded. Your choice is saved in `%LOCALAPPDATA%\jarvis\preferences.json` and takes the place of `MIC_DEVICE` in `config.py`.
+4. **Your voice**: the 20 "hey jarvis" samples (optional).
+5. **Start with Windows**: on or off.
+
+When you finish, J.A.R.V.I.S. starts listening straight away. The guide opens by itself until setup is finished and every key and model is present. Open it again any time from Settings > "Open the setup guide". The terminal commands below do the same jobs.
 
 ## Configure credentials
 
@@ -102,6 +136,26 @@ python -m backend.voice.triggers status
 ```
 
 A changed or corrupted model is refused instead of being loaded.
+
+## Teach J.A.R.V.I.S your voice (optional)
+
+Once taught, J.A.R.V.I.S only answers "hey jarvis" when it sounds like you, so a TV, a video or a visitor can't wake it. Each spoken command is checked as well: actions that change things or show your own data run only in your voice, even in conversation mode.
+
+Open the J.A.R.V.I.S screen from the tray icon, press **Settings**, then **Teach my voice**. Press **Record**, wait for the chime and say "hey jarvis"; repeat for 20 samples at your own pace (**Redo last** retakes one, **Cancel** throws everything away). Listening pauses while you teach and comes back on its own. Each sample is turned into voice numbers straight away and its sound is dropped (first, three noisy copies of it are made in memory, so you're still recognised with noise around or a different microphone); only the averaged numbers and a bar are saved, in `%LOCALAPPDATA%\jarvis\voiceprint.json`. It never leaves your laptop, and the check switches on at once. **Test** shows your score; **Forget my voice** deletes it (after a Y keypress).
+
+The same from a terminal (pause J.A.R.V.I.S first):
+
+```powershell
+python -m backend.voice.enroll teach
+```
+
+```powershell
+python -m backend.voice.enroll test      # say "hey jarvis" and see your score
+python -m backend.voice.enroll status
+python -m backend.voice.enroll delete    # forget your voiceprint
+```
+
+The first `teach` downloads the voice-check model once (WeSpeaker ResNet34, about 26 MB), checked against a fixed SHA-256 fingerprint. Re-teach it if you change microphone or it often fails to recognise you.
 
 ## Run J.A.R.V.I.S. in the background
 
@@ -181,7 +235,10 @@ Examples:
 
 Things you can say once it is listening, for example:
 
-- "open notepad", "make a note called shopping and write buy milk"
+- "open spotify", "open word", "make a note called shopping and write buy milk"
+- "volume 30", "turn it down", "mute", "pause the music", "next song"
+- "make the screen brighter", "how much battery do I have", "how busy is the CPU"
+- "switch to Word", "show me the desktop", "close notepad" (it can still ask to save), "lock my PC"
 - "what's in my downloads", "find my budget file", "open my documents folder"
 - "move cv from downloads to documents", "rename draft to final in documents"
 - "delete report from my desktop" (moves it to the workspace trash after you press Y)
@@ -196,7 +253,6 @@ Most local settings are in `backend/config.py`, including:
 - The writable workspace: `WORKSPACE`.
 - The audit log location: `AUDIT_LOG`.
 - The error log location: `APP_LOG`.
-- Allowed Windows applications: `ALLOWED_APPS`.
 - Folders the file tools may use: `FILE_FOLDERS`.
 - AI models and request timeout.
 - Microphone selection and wake-word sensitivity.
@@ -204,10 +260,11 @@ Most local settings are in `backend/config.py`, including:
 - Double-clap detection settings.
 - How it speaks: `USER_ADDRESS` ("sir" by default) and `GREETING_ON_START`.
 - When you have finished speaking: `LISTEN_END_SILENCE_SECONDS` (1.2 s) and `LISTEN_UNFINISHED_EXTRA_SECONDS`.
+- Your voice check: `VOICE_CHECK` (on once taught) and `VOICE_CHECK_STRICT` (off: if the check breaks, it warns and answers any voice; on: it ignores every "hey jarvis" until fixed).
 - Conversation mode: `CONVERSATION_MODE` (on), `CONVERSATION_SECONDS`, `CONVERSATION_MAX_TURNS`, `CONVERSATION_MAX_SECONDS`, `CONVERSATION_MEMORY_TURNS`.
 - Follow-ups when conversation mode is off: `FOLLOW_UP_ON_QUESTION`, `FOLLOW_UP_SECONDS`, `FOLLOW_UP_MAX_TURNS`.
 
-Only applications explicitly added to `ALLOWED_APPS` can be opened by the application tools. Use full executable paths and review changes carefully.
+Any app in your Start menu can be opened by name, except the blocked ones. The blocked list is security code, so it lives in `backend/tools/apps.py` rather than in the settings.
 
 ## Security and privacy
 
@@ -231,7 +288,7 @@ Run the test suite with:
 python -m pytest
 ```
 
-The tests cover the command flow, safety gate, configuration, credentials, tools (notes, apps, files, timers), voice input/output, wake triggers, follow-ups, the background app, the tray, the screen, autostart, and audit logging.
+The tests cover the command flow, safety gate, configuration, credentials, tools (notes, apps, PC controls, windows, files, timers), voice input/output, wake triggers, follow-ups, the background app, the tray, the screen, autostart, and audit logging.
 
 Tests never touch your real Documents or Downloads, and never change your real Startup folder. Tests that open real windows on screen are skipped unless you set `JARVIS_GUI_TESTS=1`.
 
@@ -247,16 +304,22 @@ Tests never touch your real Documents or Downloads, and never change your real S
 │   ├── flow.py           # Brain -> gate -> result workflow
 │   ├── gate/             # Validation, confirmation, execution, and audit logging
 │   ├── main.py           # Background app: listening loop, watchdog, startup
+│   ├── preferences.py    # Microphone choice and "setup done" (no secrets)
+│   ├── settings.py       # The Settings page's voice buttons
+│   ├── setup_guide.py    # The first-run setup guide's buttons
 │   ├── registry.py       # Explicit approved-tool registry
-│   ├── tools/            # Notes, application, file and timer tools
+│   ├── tools/            # Notes, apps, PC controls, windows, files and timers
 │   └── voice/            # Wake word, microphone, speech input, and speech output
 ├── frontend/             # Everything you see (imports nothing from backend)
 │   ├── confirm.py        # Keypress confirmation and private-reply popups
+│   ├── keybox.py         # The masked window where you paste an API key
 │   ├── tray.py           # Tray icon by the clock
 │   ├── window.py         # The on-demand screen's window process
 │   └── screen/           # The screen itself: HTML, CSS and JavaScript
 ├── scripts/               # Setup utilities (autostart)
 ├── tests/                 # Automated tests
+├── setup.ps1              # One-step setup after cloning (.venv + fingerprinted packages)
+├── start.bat              # Double-click to start (runs setup the first time)
 ├── requirements.in        # Runtime dependency inputs
 ├── requirements-dev.in    # Development dependency inputs
 ├── SECURITY.md            # Security model, threat model, and reporting
@@ -274,6 +337,10 @@ Tests never touch your real Documents or Downloads, and never change your real S
 ## License
 
 J.A.R.V.I.S. is released under the [MIT License](LICENSE).
+
+The optional voice check uses the [WeSpeaker](https://github.com/wenet-e2e/wespeaker) ResNet34 model trained on [VoxCeleb](https://www.robots.ox.ac.uk/~vgg/data/voxceleb/), licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/), as packaged in ONNX form by the [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) project. The model is downloaded separately and is not part of this repository.
+
+`backend/voice/data/other_voices.npy` holds voice numbers (no audio) computed from [LibriSpeech](https://www.openslr.org/12) dev-clean and dev-other (V. Panayotov, G. Chen, D. Povey, S. Khudanpur), licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). `scripts/build_voice_cohort.py` rebuilds it.
 
 ## Security reports
 

@@ -77,20 +77,22 @@ def verify_models(models_dir: Path) -> dict[str, Path]:
     return found
 
 
-def _fetch(url: str) -> bytes:
-    """Download one file over HTTPS, with a timeout and a size cap. GitHub answers release links
-    with a redirect to its file host, so redirects are followed; the fingerprint check that
+def _fetch(url: str, max_bytes: int = MAX_MODEL_BYTES) -> bytes:
+    """Download one file over HTTPS, with a timeout and a size cap. GitHub and Hugging Face answer
+    with a redirect to their file hosts, so redirects are followed; the fingerprint check that
     follows is what makes the content trustworthy."""
     import httpx
 
-    with httpx.Client(timeout=httpx.Timeout(30.0, connect=10.0), follow_redirects=True) as client:
+    if not url.startswith("https://"):
+        raise TriggerError("Only HTTPS downloads are allowed.")
+    with httpx.Client(timeout=httpx.Timeout(60.0, connect=10.0), follow_redirects=True) as client:
         with client.stream("GET", url) as response:
             if response.status_code != 200 or response.url.scheme != "https":
                 raise TriggerError(f"The download failed (status {response.status_code}).")
             body = bytearray()
             for part in response.iter_bytes():
                 body += part
-                if len(body) > MAX_MODEL_BYTES:
+                if len(body) > max_bytes:
                     raise TriggerError("The download was far bigger than expected, so it was stopped.")
             return bytes(body)
 
@@ -287,7 +289,7 @@ class Triggers:
     That audio is kept in memory only, and only for those 2 seconds."""
 
     MUTE_TAIL_SECONDS = 1.0            # stay deaf this long after speech ends (echo, room reverb)
-    RECENT_CHUNKS = 24                 # about 2 seconds of audio, in memory only, for the voice check
+    RECENT_CHUNKS = 30                 # about 2.4 seconds of audio, in memory only, for the voice check
     REJECT_PAUSE_SECONDS = 1.0         # after a rejected wake-up, don't check again for a moment
 
     def __init__(self, wake: WakeWordDetector | None = None, clap: ClapDetector | None = None,
@@ -327,6 +329,10 @@ class Triggers:
         count = max(0, min(len(self._recent), int(round(seconds * SAMPLE_RATE / CHUNK))))
         return list(self._recent)[-count:] if count else []
 
+    def set_voice_check(self, check: Callable[[list], bool] | None) -> None:
+        """Replace the wake-up check (used when your voice check is switched on or off)."""
+        self._voice_check = check
+
     def set_muted(self, muted: bool) -> None:
         """Call with True while J.A.R.V.I.S is speaking, and False when it stops."""
         self._muted = muted
@@ -364,12 +370,22 @@ class Triggers:
                 self._last_reject, self._above = now, 0
                 self.rejected += 1
                 if self._audit is not None:
-                    self._audit.record("wake_rejected", source=event.source, score=event.score, reason="no voice")
+                    reason = getattr(self._voice_check, "failed", None) or "no voice"
+                    extra = {}
+                    voice_score = getattr(self._voice_check, "score", None)
+                    if isinstance(voice_score, float):
+                        extra["voice_score"] = round(voice_score, 3)      # a number, never sound
+                    self._audit.record("wake_rejected", source=event.source, score=event.score,
+                                       reason=reason, **extra)
                 return None
         self._last_wake = now
         self._above = 0
         if self._audit is not None:
-            self._audit.record("wake", source=event.source, score=event.score)
+            extra = {}
+            voice_score = getattr(self._voice_check, "score", None) if event.source == "hey jarvis" else None
+            if isinstance(voice_score, float):
+                extra["voice_score"] = round(voice_score, 3)          # a number, never sound
+            self._audit.record("wake", source=event.source, score=event.score, **extra)
         return event
 
 
@@ -393,6 +409,25 @@ def pick_microphone(name: str | None, devices: list[dict] | None = None,
         raise TriggerError(f"No microphone name contains {name!r}. Check MIC_DEVICE in config.py.")
     matches.sort(key=lambda i: hostapis[devices[i]["hostapi"]]["name"] != "MME")
     return matches[0]
+
+
+MAX_MICROPHONES = 16
+
+
+def list_microphones(devices: list[dict] | None = None, hostapis: list[dict] | None = None) -> list[str]:
+    """The names of the microphones you can pick on the screen (at most 16), as Windows' MME audio
+    system names them: pick_microphone finds each one again by that name."""
+    if devices is None or hostapis is None:
+        import sounddevice as sd
+
+        devices, hostapis = list(sd.query_devices()), list(sd.query_hostapis())
+    names: list[str] = []
+    for d in devices:
+        name = str(d.get("name", "")).strip()
+        if (d.get("max_input_channels", 0) > 0 and hostapis[d["hostapi"]]["name"] == "MME" and name
+                and "sound mapper" not in name.lower() and name.isprintable() and name not in names):
+            names.append(name[:200])
+    return names[:MAX_MICROPHONES]
 
 
 class Microphone:

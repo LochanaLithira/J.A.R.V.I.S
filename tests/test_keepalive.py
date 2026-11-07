@@ -60,7 +60,7 @@ def test_warm_up_failure_is_silent():
         k.close()
 
 
-# ---- repeated replies play from memory ---------------------------------------------------
+# ---- no voice audio is ever kept ---------------------------------------------------------
 
 WAV = normalize_wav(DONE_CHIME)
 
@@ -77,52 +77,24 @@ class Player:
         pass
 
 
-def test_repeated_reply_is_not_fetched_again():
+def test_every_reply_is_fetched_fresh_and_nothing_is_kept():
     calls = []
 
     def transport(url, headers, payload, timeout):
         calls.append(payload["text"])
         return 200, WAV
 
-    player = Player()
-    s = FishSpeaker(lambda: "fish-key-123456", transport=transport, player=player)
-    assert s.speak("Opening notepad.") and s.speak("Opening notepad.") and s.speak("Cancelled.")
-    assert calls == ["Opening notepad.", "Cancelled."] and len(player.played) == 3
+    s = FishSpeaker(lambda: "fish-key-123456", transport=transport, player=Player())
+    assert s.speak("Opening notepad.") and s.speak("Opening notepad.")
+    assert calls == ["Opening notepad.", "Opening notepad."]
+    assert not any(isinstance(v, (bytes, bytearray, dict)) and v for v in vars(s).values())
 
 
-def test_reply_cache_is_bounded(monkeypatch):
+def test_there_is_no_reply_cache_or_prefetch():
     from backend.voice import speak
 
-    monkeypatch.setattr(speak, "CACHE_REPLIES", 2)
-    s = FishSpeaker(lambda: "fish-key-123456", transport=lambda *a: (200, WAV), player=Player())
-    for word in ("one", "two", "three"):
-        s.speak(word)
-    assert list(s._cache) == ["two", "three"]
-
-
-def test_wake_replies_can_be_prepared_in_advance():
-    calls = []
-
-    def transport(url, headers, payload, timeout):
-        calls.append(payload["text"])
-        return (503, b"") if payload["text"] == "Sir?" else (200, WAV)
-
-    player = Player()
-    s = FishSpeaker(lambda: "fish-key-123456", transport=transport, player=player)
-    assert s.prefetch(["Yes, sir?", "Sir?", "", "Yes, sir?"]) == 2      # one failed, one empty, one repeat
-    assert calls == ["Yes, sir?", "Sir?"] and player.played == []       # prepared, not played
-    assert s.speak("Yes, sir?") and calls == ["Yes, sir?", "Sir?"]      # plays from memory, no new request
-
-
-def test_voice_prefetch_without_a_speaker():
-    from backend.voice.speak import Voice
-
-    assert Voice(None).prefetch(["Yes, sir?"]) == 0
-
-
-def test_failed_fetches_are_not_cached():
-    s = FishSpeaker(lambda: "fish-key-123456", transport=lambda *a: (503, b""), player=Player())
-    assert not s.speak("hello") and s._cache == {}
+    assert not hasattr(speak, "CACHE_REPLIES")
+    assert not hasattr(FishSpeaker, "prefetch") and not hasattr(speak.Voice, "prefetch")
 
 
 # ---- the "got it" tone ---------------------------------------------------------------------

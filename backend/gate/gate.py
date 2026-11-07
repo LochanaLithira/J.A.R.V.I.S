@@ -15,6 +15,22 @@ from .validate import validate_args
 
 ConfirmFn = Callable[[str, dict[str, Any]], bool]
 
+# Whose voice said the command (worked out on this laptop, never by the AI):
+#   None       no voice check: a typed command, or no voiceprint taught yet
+#   "you"      it matched your voiceprint
+#   "not you"  it didn't
+#   "unsure"   too little speech to tell
+VOICE_YOU = "you"
+_VOICE_REFUSALS = {
+    "not you": "That didn't sound like you, so I didn't do it.",
+    "unsure": "I couldn't hear enough of your voice to be sure, so I didn't do it. Say it a little longer.",
+}
+
+
+def needs_your_voice(tool: Tool) -> bool:
+    """Anything that changes something, or shows your own data, needs your voice."""
+    return tool.risk is not Risk.LOW or tool.private_output
+
 
 def deny_all(tool_name: str, args: dict[str, Any]) -> bool:
     """Default confirmation: refuse. The real keypress popup is added in a later feature."""
@@ -77,7 +93,9 @@ class Gate:
         self._audit.record("denied", tool=tool_name, reason=reason)
         return Result(False, message)
 
-    def execute(self, tool_name: Any, args: Any) -> Result:
+    def execute(self, tool_name: Any, args: Any, voice: str | None = None) -> Result:
+        """`voice` says whose voice gave the command (see above); it comes from the voice check,
+        never from the AI."""
         self._audit.record("proposed", tool=tool_name, args=args)
 
         if self._rate_limited():
@@ -91,6 +109,10 @@ class Gate:
             clean = validate_args(tool.params, args)
         except ValidationError as exc:
             return self._deny(tool_name, f"invalid_args: {exc}", "I couldn't use those details.")
+
+        if voice is not None and voice != VOICE_YOU and needs_your_voice(tool):
+            reason = "not_your_voice" if voice == "not you" else "voice_unsure"
+            return self._deny(tool.name, reason, _VOICE_REFUSALS.get(voice, _VOICE_REFUSALS["not you"]))
 
         if tool.risk is Risk.HIGH:
             try:

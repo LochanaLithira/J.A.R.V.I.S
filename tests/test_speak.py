@@ -356,3 +356,273 @@ def test_console_voice_commands(tmp_path):
     console = (registry.build_gate(tmp_path / "ws", log), AuditLog(log))
     assert handle_line(*console, "voice off") == "Voice is not set up."
     assert handle_line(*console, "voice off", voice=Voice(FakeSpeaker())) == "Voice off."
+
+
+# ---- streamed replies: played while they arrive ------------------------------------------------
+
+from contextlib import contextmanager
+
+from backend.voice.speak import WavStream
+
+
+class FakeStream:
+    """Stands in for Fish: hands over the reply in pieces, and records the request."""
+
+    def __init__(self, body=None, status=200, piece=7, error=None, during=None):
+        self.body, self.status, self.piece, self.error, self.during = body, status, piece, error, during
+        self.calls = []
+
+    @contextmanager
+    def __call__(self, url, headers, payload, timeout):
+        self.calls.append((url, dict(headers), dict(payload)))
+        if self.error:
+            raise self.error
+
+        def pieces():
+            for i in range(0, len(self.body), self.piece):
+                if self.during and i == self.piece * 2:
+                    self.during()
+                yield self.body[i:i + self.piece]
+
+        yield self.status, (pieces() if self.status == 200 else iter(()))
+
+
+class FakeOut:
+    opened = []
+
+    def __init__(self, channels, rate, bits):
+        self.format, self.written, self.finished, self.aborted = (channels, rate, bits), bytearray(), False, False
+        FakeOut.opened.append(self)
+
+    def write(self, data):
+        self.written += data
+
+    def finish(self):
+        self.finished = True
+
+    def abort(self):
+        self.aborted = True
+
+
+@pytest.fixture(autouse=False)
+def outs():
+    FakeOut.opened = []
+    return FakeOut.opened
+
+
+def streamer(stream, key=KEY, **kw):
+    return FishSpeaker(lambda: key, stream=stream, audio_out=FakeOut, **kw)
+
+
+SOUND = bytes(range(256)) * 400                     # ~1.2 s of 16-bit mono at 44.1 kHz
+
+
+def test_a_streamed_reply_plays_all_of_its_sound(outs):
+    stream = FakeStream(make_wav(SOUND), piece=999)
+    assert streamer(stream).speak("Opening Spotify.")
+    out, = outs
+    assert out.format == (1, 44100, 16) and bytes(out.written) == SOUND and out.finished and not out.aborted
+
+
+def test_streaming_starts_before_the_reply_has_fully_arrived(outs):
+    import time
+
+    body, last_piece, first_play = make_wav(SOUND * 3), [0.0], []
+
+    @contextmanager
+    def stream(url, headers, payload, timeout):
+        def pieces():                               # arrives faster than it plays, like a good day
+            for i in range(0, len(body), 8192):
+                time.sleep(0.01)
+                last_piece[0] = time.monotonic()
+                yield body[i:i + 8192]
+        yield 200, pieces()
+
+    class Out(FakeOut):
+        def write(self, data):
+            first_play.append(time.monotonic())
+            super().write(data)
+
+    assert FishSpeaker(lambda: KEY, stream=stream, audio_out=Out).speak("A long reply.")
+    assert first_play[0] < last_piece[0]            # the first sound played mid-download
+
+
+def test_streamed_request_is_the_same_safe_request(outs):
+    stream = FakeStream(make_wav(SOUND))
+    streamer(stream, voice_id="a" * 32).speak("Hello <sir>")
+    (url, headers, payload), = stream.calls
+    assert url == speak.API_URL and headers["model"] == FREE_MODEL
+    assert payload == {"text": "Hello sir", "format": "wav", "latency": "balanced", "reference_id": "a" * 32}
+
+
+def test_a_short_reply_still_plays(outs):
+    assert streamer(FakeStream(make_wav(b"\x01\x00" * 100))).speak("Sir?")
+    assert bytes(outs[0].written) == b"\x01\x00" * 100
+
+
+@pytest.mark.parametrize("body", [
+    b"not audio at all" * 10,
+    make_wav(SOUND, audio_format=3),                 # compressed / float
+    make_wav(SOUND, rate=96000),
+    make_wav(SOUND, bits=12),
+    b"RIFF\x00\x00\x00\x00WAVE" + b"junk" + struct.pack("<I", 10_000_000) + b"x" * 100,
+], ids=["not-audio", "compressed", "too-fast", "12-bit", "huge-chunk"])
+def test_odd_audio_is_refused_and_never_played(outs, body):
+    s = streamer(FakeStream(body))
+    assert not s.speak("hi") and "playable" in s.last_error
+    assert all(not o.written for o in outs)
+
+
+def test_streamed_errors_are_explained_without_details(outs):
+    s = streamer(FakeStream(status=429))
+    assert not s.speak("hi") and "rate limiting" in s.last_error and outs == []
+    s = streamer(FakeStream(error=httpx.ConnectError("C:\\secret")))
+    assert not s.speak("hi") and s.last_error == "I couldn't reach Fish Audio." and outs == []
+
+
+def test_too_much_streamed_audio_is_cut_off(outs, monkeypatch):
+    monkeypatch.setattr(speak, "MAX_AUDIO_BYTES", 50_000)
+    s = streamer(FakeStream(make_wav(SOUND * 3), piece=4096))
+    assert not s.speak("hi") and "more audio" in s.last_error
+    assert all(o.aborted for o in outs)
+
+
+def test_stop_cuts_a_streamed_reply_off(outs):
+    holder = {}
+    s = streamer(FakeStream(make_wav(SOUND * 3), piece=4096, during=lambda: holder["s"].stop()))
+    holder["s"] = s
+    assert not s.speak("A long reply.")
+    assert all(o.aborted or not o.written for o in outs)
+
+
+def test_no_key_means_no_streamed_request(outs):
+    stream = FakeStream(make_wav(SOUND))
+    s = FishSpeaker(lambda: None, stream=stream, audio_out=FakeOut)
+    assert not s.speak("hi") and stream.calls == [] and "No Fish Audio key" in s.last_error
+
+
+def test_a_speaker_that_cannot_open_is_explained(outs):
+    def broken(*a):
+        raise OSError("no device")
+
+    s = FishSpeaker(lambda: KEY, stream=FakeStream(make_wav(SOUND)), audio_out=broken)
+    assert not s.speak("hi") and s.last_error == "Windows could not play the audio."
+
+
+def test_nothing_of_a_streamed_reply_is_kept(outs):
+    s = streamer(FakeStream(make_wav(SOUND)))
+    s.speak("Opening Spotify.")
+    assert not any(isinstance(v, (bytes, bytearray)) and v for v in vars(s).values())
+
+
+def test_the_app_streams_by_default():
+    assert FishSpeaker(lambda: KEY)._stream is speak._httpx_stream
+
+
+# ---- several sentences at once ------------------------------------------------------------------
+
+import time
+
+from backend.voice.speak import split_sentences
+
+
+@pytest.mark.parametrize("text, parts", [
+    ("Opening Spotify, sir.", ["Opening Spotify, sir."]),
+    ("Battery at sixty percent. The processor is at twelve percent.",
+     ["Battery at sixty percent.", "The processor is at twelve percent."]),
+    ("Yes. Sir? Opening Word now.", ["Yes. Sir? Opening Word now."]),          # tiny bits join the next
+    ("One thing here. Two things here. Three things here. Four things here.",
+     ["One thing here.", "Two things here.", "Three things here. Four things here."]),
+    ("Version 1.5 is ready, sir.", ["Version 1.5 is ready, sir."]),           # no split inside numbers
+])
+def test_sentences_are_split_sensibly(text, parts):
+    assert split_sentences(text) == parts
+
+
+class MultiStream:
+    """Fish for several sentences: each request gets its own WAV, made from the sentence's text."""
+
+    def __init__(self, fail_on=None):
+        self.calls, self.fail_on, self.lock = [], fail_on, threading.Lock()
+
+    @staticmethod
+    def sound_for(text):
+        return (text.encode() * 400)[:len(text) * 400 // 2 * 2]
+
+    @contextmanager
+    def __call__(self, url, headers, payload, timeout):
+        with self.lock:
+            self.calls.append(payload["text"])
+        if payload["text"] == self.fail_on:
+            yield 503, iter(())
+            return
+        body = make_wav(self.sound_for(payload["text"]))
+
+        def pieces():
+            for i in range(0, len(body), 1000):
+                time.sleep(0.02)
+                yield body[i:i + 1000]
+        yield 200, pieces()
+
+
+def test_each_sentence_is_requested_and_played_in_order(outs):
+    stream = MultiStream()
+    text = "Battery at sixty percent. The processor is at twelve percent."
+    assert streamer(stream).speak(text)
+    first, second = split_sentences(text)
+    assert sorted(stream.calls) == sorted([first, second])
+    out, = outs                                   # one speaker stream for the whole reply
+    assert bytes(out.written) == MultiStream.sound_for(first) + MultiStream.sound_for(second)
+
+
+def test_a_failing_sentence_stops_the_reply_and_says_why(outs):
+    text = "Battery at sixty percent. The processor is at twelve percent."
+    s = streamer(MultiStream(fail_on="The processor is at twelve percent."))
+    assert not s.speak(text) and "Fish Audio is having trouble" in s.last_error
+
+
+def test_fish_speed_is_remembered_as_a_number_only(outs):
+    s = streamer(MultiStream())
+    before = s._speed
+    s.speak("Battery at sixty percent. The processor is at twelve percent.")
+    assert isinstance(s._speed, float) and s._speed != before and 0 < s._speed <= 3.0
+
+
+def test_wav_stream_reads_a_header_split_into_tiny_pieces():
+    w, body, sound = WavStream(), make_wav(SOUND[:1000]), bytearray()
+    for i in range(len(body)):
+        sound += w.feed(body[i:i + 1])
+    assert w.format == (1, 44100, 16) and bytes(sound) == SOUND[:1000]
+
+
+# ---- when a streamed reply may start --------------------------------------------------------------
+
+from backend.voice.speak import ready_to_play
+
+
+def test_fast_arrival_starts_after_a_short_look():
+    assert ready_to_play(buffered=0.7, elapsed=0.6, expected=4.0)
+    assert not ready_to_play(buffered=0.1, elapsed=0.05, expected=4.0)       # always a small head start
+
+
+def test_an_opening_burst_is_not_trusted():
+    assert not ready_to_play(buffered=0.4, elapsed=0.05, expected=2.0)       # quick start, may stall next
+
+
+def test_slow_arrival_waits_for_a_bigger_head_start():
+    # sound arriving at 0.4x real time (as measured on a slow day): a 4 s reply needs most of it first
+    assert not ready_to_play(buffered=1.0, elapsed=2.5, expected=4.0)
+    assert ready_to_play(buffered=3.0, elapsed=7.5, expected=4.0)
+
+
+def test_a_slow_start_never_plays_a_gap_on_the_measured_profile():
+    """Simulate the slow day measured live: 3.9 s of sound arriving over 10 s after a 0.8 s wait."""
+    rate, total, step = 0.39, 3.9, 0.05
+    t, start = 0.0, None
+    while start is None:
+        t += step
+        if ready_to_play(min(total, rate * t), t, expected=72 * 0.075):
+            start = t
+    for k in range(1, int(total / step)):          # while playing, sound must already be there
+        played = k * step
+        assert rate * (start + played) >= min(total, played) - 1e-9

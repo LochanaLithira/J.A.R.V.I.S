@@ -35,7 +35,7 @@ from collections import deque
 from enum import Enum
 from typing import Any, Callable
 
-from . import config
+from . import config, preferences
 from .brain import Brain, BrainError, GeminiBrain, Turn
 from .credentials import CredentialError, get_secret
 from .flow import Flow, FlowError
@@ -47,8 +47,10 @@ from .voice.keepalive import warm_all
 from .voice.speak import FishSpeaker, Voice
 from .voice.style import Style
 from .voice.triggers import (ALARM_CHIME, CHUNK, SAMPLE_RATE, ClapDetector, Microphone, TriggerError, Triggers,
-                             WakeEvent, WakeWordDetector, pick_microphone, play_chime, play_close_chime,
-                             play_done_chime)
+                             WakeEvent, WakeWordDetector, download_models, list_microphones, pick_microphone,
+                             play_chime, play_close_chime, play_done_chime, verify_models)
+from .voice.voiceprint import (AllChecks, SpeakerCheck, SpeakerModel, StrictCheck, VoiceprintError, command_judge,
+                               download_speaker_model, load_voiceprint, speaker_model_path)
 
 log = logging.getLogger("jarvis")
 
@@ -86,6 +88,7 @@ def make_brain_getter() -> Callable[[], Brain]:
                                      address=config.USER_ADDRESS))
         return cache[0]
 
+    get.reset = cache.clear                 # a new key was stored: build the brain again on next use
     return get
 
 
@@ -97,6 +100,11 @@ def make_flow_getter(gate: Gate, get_brain: Callable[[], Brain]) -> Callable[[],
             cache.append(Flow(get_brain(), gate))
         return cache[0]
 
+    def reset() -> None:
+        cache.clear()
+        getattr(get_brain, "reset", lambda: None)()
+
+    get.reset = reset
     return get
 
 
@@ -241,6 +249,8 @@ class Assistant:
                  style: Style | None = None,
                  retry_seconds: float = RETRY_SECONDS, mic_idle_seconds: float = MIC_IDLE_SECONDS):
         self._triggers, self._speech, self._get_flow, self._voice = triggers, speech, get_flow, voice
+        if speech is not None and getattr(speech, "voice_judge", "absent") is None:
+            speech.voice_judge = command_judge(getattr(triggers, "_voice_check", None))
         self._warm = warm                     # reconnect to the cloud services while you speak
         self._follow_on_question = follow_up_on_question
         self._follow_seconds, self._follow_max = follow_up_seconds, follow_up_max_turns
@@ -259,7 +269,7 @@ class Assistant:
         self._device, self._mic_factory, self._chime = device, mic_factory, chime
         self._show_text, self._on_status, self._on_notice, self._out = show_text, on_status, on_notice, out
         self._retry, self._mic_idle = retry_seconds, mic_idle_seconds
-        self._paused = self._locked = self._asleep = False
+        self._paused = self._locked = self._asleep = self._teaching = False
         self._stop = threading.Event()
         self._interrupt = threading.Event()   # set whenever the microphone must be let go at once
         self._thread: threading.Thread | None = None
@@ -291,6 +301,22 @@ class Assistant:
     def set_asleep(self, asleep: bool) -> None:
         """The laptop is going to sleep (True) or has woken up (False). Waking also reopens the mic."""
         self._change("_asleep", asleep)
+
+    def set_teaching(self, teaching: bool) -> None:
+        """You are teaching J.A.R.V.I.S your voice (True): it lets go of the microphone so it
+        doesn't answer each "hey jarvis", and takes it back when you finish (False)."""
+        self._change("_teaching", teaching)
+
+    @property
+    def voice_check(self) -> Any:
+        return getattr(self._triggers, "_voice_check", None)
+
+    def set_voice_check(self, check: Any) -> None:
+        """Swap the wake-up checks (e.g. your voice check just switched on), without a restart.
+        Your commands are then checked with the same voiceprint."""
+        self._triggers.set_voice_check(check)
+        if self._speech is not None and hasattr(self._speech, "voice_judge"):
+            self._speech.voice_judge = command_judge(check)
 
     def announce(self, label: str) -> None:
         """A timer finished (called from the timer thread). Handled by the loop within ~0.1 s."""
@@ -337,7 +363,7 @@ class Assistant:
                 mic.drain()
 
     def listening_allowed(self) -> bool:
-        return not (self._paused or self._locked or self._asleep or self._stop.is_set())
+        return not (self._paused or self._locked or self._asleep or self._teaching or self._stop.is_set())
 
     def start(self) -> None:
         self._thread = threading.Thread(target=self.run, name="jarvis-listen", daemon=True)
@@ -415,7 +441,7 @@ class Assistant:
         self._set_status(Status.STOPPED)
 
     def _idle_status(self) -> Status:
-        if self._paused:
+        if self._paused or self._teaching:
             return Status.PAUSED
         if self._locked:
             return Status.LOCKED
@@ -529,7 +555,7 @@ class Assistant:
         elif is_stop_phrase(heard.text):
             self._goodbye()                      # "hey jarvis... never mind"
         elif heard.text:
-            act_s, voice_s, result = self._act(heard.text)
+            act_s, voice_s, result = self._act(heard.text, voice=heard.voice)
             # durations only, never words: shows where the time goes
             log.info("timing: listening and hearing %.1fs, AI and action %.1fs, voice %.1fs",
                      heard_s, act_s, voice_s)
@@ -603,7 +629,7 @@ class Assistant:
             if is_stop_phrase(heard.text):
                 self._goodbye()
                 return
-            _, _, result = self._act(heard.text, tuple(memory))
+            _, _, result = self._act(heard.text, tuple(memory), voice=heard.voice)
             turn = self._turn(heard.text, result)
             if turn is not None:
                 memory.append(turn)
@@ -624,9 +650,10 @@ class Assistant:
         else:
             self._emit("nothing", reason=heard.reason)
 
-    def _act(self, text: str, history: tuple[Turn, ...] = ()) -> tuple[float, float, Any]:
+    def _act(self, text: str, history: tuple[Turn, ...] = (), voice: str | None = None) -> tuple[float, float, Any]:
         """Run a heard command like say. Returns (seconds for AI and action, seconds speaking,
-        the result, or None if nothing ran)."""
+        the result, or None if nothing ran). `voice` is the voice check's verdict on the command:
+        actions that change things or show your data need it to be "you" (the gate decides)."""
         t0 = time.monotonic()
         if self._get_flow is None:
             self._say_out("NO: The AI is not set up.")
@@ -635,7 +662,8 @@ class Assistant:
         self._emit("thinking")
         try:
             flow = self._get_flow()
-            result = flow.run(text, history) if history else flow.run(text)
+            extra = {"voice": voice} if voice is not None else {}
+            result = flow.run(text, history, **extra) if history else flow.run(text, **extra)
         except (BrainError, CredentialError, FlowError) as exc:
             self._say_out(f"NO: {exc}")
             self._notice(str(exc))
@@ -663,6 +691,131 @@ class Assistant:
         return t1 - t0, time.monotonic() - t1, result
 
 
+def _speech_trimmer() -> Any:
+    """Silero VAD for the voice check, so only the part where you speak is compared."""
+    try:
+        return SileroVAD(config.MODELS_DIR)
+    except Exception as exc:
+        log.error("voice check speech trimmer unavailable: %s", type(exc).__name__)
+        return None
+
+
+def make_speaker_check(get: Callable[[str], str | None] = get_secret,
+                       model_factory: Callable[[Any], Any] = SpeakerModel,
+                       vad_factory: Callable[[], Any] = _speech_trimmer) -> tuple[Callable | None, str]:
+    """Your voice check, if you have taught J.A.R.V.I.S your voice: (check or None, problem text).
+
+    A changed voiceprint or a missing model is never ignored silently: the problem is reported,
+    and VOICE_CHECK_STRICT decides whether "hey jarvis" carries on without the check or is refused."""
+    if not config.VOICE_CHECK:
+        return None, ""
+    try:
+        voiceprint = load_voiceprint(config.VOICEPRINT, get)
+        if voiceprint is None:
+            return None, ""                          # not taught yet: nothing to check
+        check = SpeakerCheck(model_factory(config.MODELS_DIR), voiceprint, vad=vad_factory())
+        return (StrictCheck(check) if config.VOICE_CHECK_STRICT else check), ""
+    except VoiceprintError as exc:
+        problem = str(exc)
+    except Exception as exc:
+        log.error("voice check failed to start: %s", type(exc).__name__)
+        problem = "The voice check couldn't start."
+    if config.VOICE_CHECK_STRICT:
+        return StrictCheck(None), problem + " Until it is fixed, every \"hey jarvis\" is ignored."
+    return None, problem + " Until it is fixed, J.A.R.V.I.S answers any voice."
+
+
+def make_voice_settings(get_assistant: Callable[[], Any], screen: Any, confirm: Callable[[str, dict], bool]) -> Any:
+    """The Settings page's voice buttons, wired to the real microphone, model and Credential Manager.
+    A quiet thread cancels a teaching session that was left alone."""
+    from .credentials import delete_secret, set_secret
+    from .settings import VoiceSettings
+    from .voice.enroll import screen_prepare
+    from .voice.other_voices import other_voices
+    from .voice.teaching import TeachingSession
+
+    def make_session(save, pause_listening, on_update, current):
+        made: list = []
+
+        def voices() -> list:
+            """Windows' voices, made once per session in memory (for chatter copies and comparing)."""
+            if not made:
+                made.append(other_voices())
+            return made[0]
+
+        return TeachingSession(screen_prepare(on_level=lambda chunk: screen.set_level(sound_level(chunk)),
+                                              voices=voices),
+                               voices, save, pause_listening, on_update, current=current)
+
+    settings = VoiceSettings(get_assistant, screen.teach, screen.set_voice, confirm, get_secret, set_secret,
+                             delete_secret, make_session, model_factory=SpeakerModel, vad_factory=_speech_trimmer)
+
+    def watch() -> None:
+        while True:
+            time.sleep(10)
+            settings.check_idle()
+
+    threading.Thread(target=watch, name="jarvis-settings-idle", daemon=True).start()
+    return settings
+
+
+def models_ready() -> bool:
+    try:
+        verify_models(config.MODELS_DIR)
+        speaker_model_path(config.MODELS_DIR)
+        return True
+    except (TriggerError, VoiceprintError):
+        return False
+
+
+def download_all_models() -> None:
+    """The wake-word models and the voice-check model, each saved only if its fingerprint matches."""
+    download_models(config.MODELS_DIR)
+    download_speaker_model(config.MODELS_DIR)
+
+
+def make_setup_guide(screen: Any, get_assistant: Callable[[], Any], start_listening: Callable[[], str],
+                     on_key_saved: Callable[[str], None]) -> Any:
+    """The setup guide's buttons, wired to the key box, the model downloads, the microphones and
+    the autostart script."""
+    import functools
+    import webbrowser
+
+    from frontend.keybox import ask_key
+    from .credentials import set_secret
+    from .setup_guide import SetupGuide, mic_levels
+
+    def pause(on: bool) -> None:
+        a = get_assistant()
+        if a is not None:
+            a.set_teaching(on)
+
+    def voice_works() -> tuple[bool, str]:
+        """Fish Audio says one short line, so you hear that the voice works."""
+        speaker = FishSpeaker(lambda: get_secret("fish_api_key"), voice_id=config.FISH_VOICE_ID)
+        pause(True)
+        try:
+            ok = speaker.speak(f"Voice systems online, {config.USER_ADDRESS}.", wait=True)
+        finally:
+            pause(False)
+        return ok, ("" if ok else "refused")
+
+    def is_listening() -> bool:
+        a = get_assistant()
+        return a is not None and a.status is not Status.PROBLEM
+
+    return SetupGuide(screen.setup, get_secret=get_secret, set_secret=set_secret, ask_key=ask_key,
+                      on_key_saved=on_key_saved, open_url=webbrowser.open, voice_check=voice_works,
+                      models_ready=models_ready, download_models=download_all_models,
+                      list_mics=list_microphones, current_mic=preferences.microphone,
+                      save_mic=lambda name: preferences.update(mic=name),
+                      mic_levels=functools.partial(mic_levels, pick=pick_microphone, mic_factory=Microphone,
+                                                   level=sound_level),
+                      voice_taught=lambda: config.VOICEPRINT.is_file(), start_listening=start_listening,
+                      is_listening=is_listening, pause=pause, load_prefs=preferences.load,
+                      update_prefs=preferences.update, level=screen.set_level)
+
+
 def build_assistant(audit: Any, get_flow: Callable[[], Flow] | None, voice: Voice | None, *,
                     out: Callable[[str], None] | None = None, show_text: Callable[[str], Any] | None = None,
                     on_status: Callable[[Status, str], None] | None = None,
@@ -670,8 +823,8 @@ def build_assistant(audit: Any, get_flow: Callable[[], Flow] | None, voice: Voic
                     on_event: Callable[[str, dict], None] | None = None,
                     on_level: Callable[[float], None] | None = None,
                     style: Style | None = None) -> Assistant:
-    """Everything the loop needs, from config.py. Raises TriggerError if the models or the
-    microphone named in config.py are missing."""
+    """Everything the loop needs, from config.py (and the microphone picked in the setup guide).
+    Raises TriggerError if the models or the microphone are missing."""
     wake = WakeWordDetector(config.MODELS_DIR)
     clap = None
     if config.CLAP_ENABLED:
@@ -679,10 +832,15 @@ def build_assistant(audit: Any, get_flow: Callable[[], Flow] | None, voice: Voic
         clap = ClapDetector(config.CLAP_MIN_LEVEL, on_clap=on_clap)
     voice_check = (VoiceCheck(SileroVAD(config.MODELS_DIR), config.WAKE_MIN_SPEECH_SECONDS,
                               config.WAKE_SPEECH_CONFIDENCE) if config.WAKE_SPEECH_CHECK else None)
+    speaker, problem = make_speaker_check()
+    if problem and on_notice is not None:
+        on_notice(problem)
+    checks = [(name, c) for name, c in (("no voice", voice_check), ("not your voice", speaker)) if c is not None]
     triggers = Triggers(wake, clap, config.WAKE_THRESHOLD, config.WAKE_PATIENCE,
-                        config.WAKE_COOLDOWN_SECONDS, audit=audit, voice_check=voice_check)
+                        config.WAKE_COOLDOWN_SECONDS, audit=audit,
+                        voice_check=AllChecks(checks) if checks else None)
     return Assistant(triggers, make_speech(audit, on_recorded=play_done_chime), get_flow, voice,
-                     pick_microphone(config.MIC_DEVICE), show_text=show_text, on_status=on_status,
+                     pick_microphone(preferences.microphone()), show_text=show_text, on_status=on_status,
                      on_notice=on_notice, out=out, warm=warm_all,
                      follow_up_on_question=config.FOLLOW_UP_ON_QUESTION,
                      follow_up_seconds=config.FOLLOW_UP_SECONDS, follow_up_max_turns=config.FOLLOW_UP_MAX_TURNS,
@@ -870,18 +1028,44 @@ def main() -> int:
         if "a" in holder:
             holder["a"].toggle_pause()
 
+    def voice_check_state() -> str:
+        a = holder.get("a")
+        check = getattr(getattr(a, "_triggers", None), "_voice_check", None)
+        names = [name for name, _ in getattr(check, "_checks", [])]
+        return "on" if "not your voice" in names else "off"
+
     def systems() -> list[dict]:
         keys = key_status()
         a = holder.get("a")
         return [{"name": "Microphone", "ok": a is not None and a.status is not Status.PROBLEM},
                 {"name": "Wake word", "ok": a is not None},
+                {"name": "Voice check", "ok": voice_check_state() == "on"},
                 {"name": "Gemini", "ok": keys.get("gemini_api_key", False)},
                 {"name": "Groq", "ok": keys.get("stt_api_key", False)},
                 {"name": "Fish Audio", "ok": keys.get("fish_api_key", False)},
                 {"name": "Audit chain intact", "ok": gate.audit.verify()[0]}]
 
-    screen = ScreenLink(on_command=lambda cmd: toggle_pause() if cmd == "toggle_pause" else None,
-                        get_systems=systems, get_timers=timers.snapshot)
+    settings_box: dict[str, Any] = {}
+
+    def on_command(cmd: str) -> None:
+        if cmd == "toggle_pause":
+            toggle_pause()
+        elif cmd.startswith("setup_") and "g" in settings_box:
+            settings_box["g"].handle(cmd)
+        elif "s" in settings_box:
+            settings_box["s"].handle(cmd)
+
+    def on_choice(cmd: str, value: int) -> None:
+        if "g" in settings_box:
+            settings_box["g"].handle(cmd, value)
+
+    def on_screen_ready() -> None:
+        if "g" in settings_box:
+            settings_box["g"].screen_ready()
+
+    screen = ScreenLink(on_command=on_command, get_systems=systems, get_timers=timers.snapshot,
+                        on_choice=on_choice, on_ready=on_screen_ready)
+    settings_box["s"] = make_voice_settings(lambda: holder.get("a"), screen, popup_confirm)
     feed_status, feed_event = screen_feed(screen)
     tray = Tray(on_toggle_pause=toggle_pause,
                 is_paused=lambda: holder["a"].paused if "a" in holder else False,
@@ -897,29 +1081,52 @@ def main() -> int:
         if not screen.is_open:
             show_message(text)
 
-    try:
-        holder["a"] = build_assistant(gate.audit, get_flow, voice, show_text=show_text, on_status=on_status,
-                                      on_notice=lambda m: tray.notify("J.A.R.V.I.S", m),
-                                      on_event=feed_event, on_level=screen.set_level)
-    except TriggerError as exc:
-        log.warning("cannot listen: %s", exc)
-        on_status(Status.PROBLEM, str(exc))
-        tray.notify("J.A.R.V.I.S can't listen yet", str(exc))
-    if "a" in holder:
-        timers.on_fire = holder["a"].announce
-    else:                                # no listening loop: still ring, label on screen only
-        timers.on_fire = lambda label: (tray.notify("J.A.R.V.I.S", "Your timer is done."),
-                                        show_message(f"Timer done: {label}") if label else None)
+    restart_lock = threading.Lock()
+
+    def start_listening(first: bool = False) -> str:
+        """Build the listening loop and start it, replacing a running one (after the setup guide
+        changes the microphone or downloads the models). Returns a problem to show, or ""."""
+        with restart_lock:
+            old = holder.pop("a", None)
+            paused = old is not None and old.paused
+            if old is not None:
+                old.stop()
+            problem = ""
+            try:
+                holder["a"] = build_assistant(gate.audit, get_flow, voice, show_text=show_text, on_status=on_status,
+                                              on_notice=lambda m: tray.notify("J.A.R.V.I.S", m),
+                                              on_event=feed_event, on_level=screen.set_level)
+            except TriggerError as exc:
+                log.warning("cannot listen: %s", exc)
+                problem = str(exc)
+                on_status(Status.PROBLEM, problem)
+                if first:
+                    tray.notify("J.A.R.V.I.S can't listen yet", problem)
+            if "a" in holder:
+                timers.on_fire = holder["a"].announce
+                if paused:
+                    holder["a"].pause()
+                holder["a"].start()
+            else:                            # no listening loop: still ring, label on screen only
+                timers.on_fire = lambda label: (tray.notify("J.A.R.V.I.S", "Your timer is done."),
+                                                show_message(f"Timer done: {label}") if label else None)
+            return problem
+
+    def key_saved(name: str) -> None:
+        if name == "gemini_api_key":
+            get_flow.reset()                 # the next command uses the new key
+
+    settings_box["g"] = make_setup_guide(screen, lambda: holder.get("a"), start_listening, key_saved)
+    start_listening(first=True)
+    guide_needed = settings_box["g"].needed()
     problems = startup_checks()
-    if problems:
+    if guide_needed:                         # first run, or something essential is missing
+        settings_box["g"].request_open()
+        screen.open()
+    elif problems:
         tray.notify("J.A.R.V.I.S needs setting up", "\n".join(problems))
-    if "a" in holder:
-        holder["a"].start()
-        if config.GREETING_ON_START:
-            holder["a"].say_line(Style(config.USER_ADDRESS).greeting())
-        if config.WAKE_REPLY:                # prepare "Yes, sir?" now, so waking answers instantly
-            threading.Thread(target=voice.prefetch, args=(Style(config.USER_ADDRESS).acknowledgements(),),
-                             name="jarvis-prefetch", daemon=True).start()
+    if "a" in holder and config.GREETING_ON_START and not guide_needed:
+        holder["a"].say_line(Style(config.USER_ADDRESS).greeting())
     try:
         tray.run()                       # the Windows message loop; returns when you choose Quit
     finally:

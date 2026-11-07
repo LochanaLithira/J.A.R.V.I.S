@@ -24,6 +24,7 @@
       <span id="clock-date">---</span>
     </div>
     <div class="controls">
+      <button id="settings-btn" class="hud-btn" type="button">Settings</button>
       <button id="pause-btn" class="hud-btn" type="button">Pause listening</button>
     </div>
   </header>
@@ -58,6 +59,178 @@
     <ul id="systems" class="systems"></ul>
     <div id="boot-text" class="boot-text"></div>
   </footer>
+
+  <div id="settings" class="overlay" hidden>
+    <div class="overlay-card" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+      <header class="overlay-head">
+        <h2 id="settings-title" class="panel-title"><span>Settings</span><i></i></h2>
+        <button id="settings-close" class="hud-btn" type="button">Close</button>
+      </header>
+
+      <section id="voice-section" class="setting" aria-label="Your voice">
+        <h3 class="setting-name">Your voice</h3>
+        <p id="voice-status" class="setting-status">Checking...</p>
+        <p id="voice-message" class="setting-message"></p>
+        <p class="setting-help">Teach J.A.R.V.I.S your "hey jarvis" so only you can wake it. You say it 20 times,
+          at your own pace. Nothing is recorded: each one becomes numbers straight away, and they stay on this laptop.</p>
+        <div class="setting-actions">
+          <button id="voice-teach" class="hud-btn primary" type="button">Teach my voice</button>
+          <button id="voice-test" class="hud-btn" type="button">Test</button>
+          <button id="voice-forget" class="hud-btn danger" type="button">Forget my voice</button>
+        </div>
+      </section>
+
+      <section class="setting setting-gap" aria-label="Setup">
+        <h3 class="setting-name">Setup</h3>
+        <p class="setting-help">Keys, models, microphone, your voice and starting with Windows, one step at a time.</p>
+        <div class="setting-actions">
+          <button id="guide-open" class="hud-btn" type="button">Open the setup guide</button>
+        </div>
+      </section>
+
+      <section id="teach" class="teach" aria-label="Teaching your voice" aria-live="polite" hidden>
+        <div class="teach-top">
+          <div id="teach-dial" class="dial teach-dial"><span id="teach-count">0 / 20</span></div>
+          <div class="teach-words">
+            <div id="teach-phase" class="teach-phase">Getting ready...</div>
+            <div id="teach-tip" class="teach-tip"></div>
+            <div id="teach-message" class="teach-message"></div>
+          </div>
+        </div>
+        <div id="teach-result" class="teach-result" hidden>
+          <div class="scale">
+            <div id="scale-yours" class="scale-yours" title="Your voice"></div>
+            <div id="scale-others" class="scale-others" title="Other voices"></div>
+            <div id="scale-bar" class="scale-bar" title="The bar"></div>
+          </div>
+          <div class="scale-legend">
+            <span class="legend-yours">Your voice</span><span class="legend-others">Other voices</span><span class="legend-bar">The bar</span>
+          </div>
+        </div>
+        <div class="setting-actions">
+          <button id="teach-record" class="hud-btn primary" type="button">Record</button>
+          <button id="teach-redo" class="hud-btn" type="button">Redo last</button>
+          <button id="teach-cancel" class="hud-btn" type="button">Cancel</button>
+          <button id="teach-done" class="hud-btn primary" type="button" hidden>Done</button>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <!-- The setup guide. Like Settings, it only presses buttons; keys are typed into a separate
+       native box that J.A.R.V.I.S opens, never into this page. -->
+  <div id="guide" class="overlay" hidden>
+    <div class="overlay-card guide-card" role="dialog" aria-modal="true" aria-labelledby="guide-title">
+      <header class="overlay-head">
+        <h2 id="guide-title" class="panel-title"><span>Setup</span><i></i></h2>
+        <button id="guide-close" class="hud-btn" type="button">Close</button>
+      </header>
+      <ol id="guide-rail" class="guide-rail" aria-label="Steps"></ol>
+
+      <section class="guide-step" data-step="welcome" aria-label="Welcome">
+        <h3 class="setting-name">Welcome</h3>
+        <p class="guide-lead">Let's get J.A.R.V.I.S ready. It takes about five minutes.</p>
+        <ul class="guide-list">
+          <li>Everything it uses is free. You'll make three free accounts and copy a key from each.</li>
+          <li>Keys are kept in the Windows Credential Manager, never in a file and never on this screen.</li>
+          <li>J.A.R.V.I.S never records you. Only what you say after "hey jarvis" is sent, to be turned into text.</li>
+          <li>Anything risky, like deleting a file, needs you to press a key first.</li>
+        </ul>
+        <p class="setting-help">You can skip any step and come back later: Settings, then "Open the setup guide".</p>
+      </section>
+
+      <section class="guide-step" data-step="keys" aria-label="Keys">
+        <h3 class="setting-name">Keys</h3>
+        <p class="setting-help">For each service: press "Get a free key", sign in, create a key and copy it. Then press
+          "Add key" and paste it into the small window that opens. It's shown as dots and saved straight into the
+          Credential Manager.</p>
+        <div class="guide-keys">
+          <div class="guide-key" data-key="gemini">
+            <div class="guide-key-name">Gemini <small>the AI that understands you</small></div>
+            <div class="guide-key-state" data-state></div>
+            <button class="hud-btn" type="button" data-press="setup_get_gemini">Get a free key</button>
+            <button class="hud-btn primary" type="button" data-press="setup_key_gemini" data-add>Add key</button>
+          </div>
+          <div class="guide-key" data-key="groq">
+            <div class="guide-key-name">Groq <small>turns your speech into text</small></div>
+            <div class="guide-key-state" data-state></div>
+            <button class="hud-btn" type="button" data-press="setup_get_groq">Get a free key</button>
+            <button class="hud-btn primary" type="button" data-press="setup_key_groq" data-add>Add key</button>
+          </div>
+          <div class="guide-key" data-key="fish">
+            <div class="guide-key-name">Fish Audio <small>J.A.R.V.I.S's voice</small></div>
+            <div class="guide-key-state" data-state></div>
+            <button class="hud-btn" type="button" data-press="setup_get_fish">Get a free key</button>
+            <button class="hud-btn primary" type="button" data-press="setup_key_fish" data-add>Add key</button>
+          </div>
+        </div>
+        <div class="setting-actions">
+          <button id="guide-test-keys" class="hud-btn" type="button" data-press="setup_test_keys">Test my keys</button>
+        </div>
+        <p class="guide-note" data-note="keys"></p>
+      </section>
+
+      <section class="guide-step" data-step="models" aria-label="Models">
+        <h3 class="setting-name">Models</h3>
+        <p class="setting-help">Small files that let J.A.R.V.I.S hear "hey jarvis" and recognise your voice on this laptop
+          (about 30 MB). Each one is checked against its fingerprint before it is saved.</p>
+        <p id="guide-models-state" class="setting-status"></p>
+        <div class="setting-actions">
+          <button id="guide-models" class="hud-btn primary" type="button" data-press="setup_models">Download</button>
+        </div>
+        <p class="guide-note" data-note="models"></p>
+      </section>
+
+      <section class="guide-step" data-step="mic" aria-label="Microphone">
+        <h3 class="setting-name">Microphone</h3>
+        <p class="setting-help">Pick the microphone J.A.R.V.I.S listens with, then press Test and say something. The test
+          only measures how loud it is; nothing is recorded.</p>
+        <div id="guide-mics" class="guide-mics" role="radiogroup" aria-label="Microphones"></div>
+        <div class="guide-meter" aria-hidden="true"><div id="guide-level"></div></div>
+        <div class="setting-actions">
+          <button id="guide-mic-test" class="hud-btn primary" type="button" data-press="setup_mic_test">Test</button>
+        </div>
+        <p class="guide-note" data-note="mic"></p>
+      </section>
+
+      <section class="guide-step" data-step="voice" aria-label="Your voice">
+        <h3 class="setting-name">Your voice</h3>
+        <p class="setting-help">Teach J.A.R.V.I.S your "hey jarvis" so only you can wake it. You say it 20 times, at your
+          own pace. Each one becomes numbers straight away; no sound is kept.</p>
+        <p id="guide-voice-state" class="setting-status"></p>
+        <div class="setting-actions">
+          <button id="guide-teach" class="hud-btn primary" type="button">Teach my voice</button>
+        </div>
+      </section>
+
+      <section class="guide-step" data-step="autostart" aria-label="Start with Windows">
+        <h3 class="setting-name">Start with Windows</h3>
+        <p class="setting-help">Start J.A.R.V.I.S by itself when you sign in. This adds one shortcut to your own Startup
+          folder: no admin rights, and you can turn it off here or in Task Manager.</p>
+        <p id="guide-autostart-state" class="setting-status"></p>
+        <div class="setting-actions">
+          <button class="hud-btn primary" type="button" data-press="setup_autostart_on">Turn on</button>
+          <button class="hud-btn" type="button" data-press="setup_autostart_off">Turn off</button>
+        </div>
+        <p class="guide-note" data-note="autostart"></p>
+      </section>
+
+      <section class="guide-step" data-step="done" aria-label="Done">
+        <h3 class="setting-name">Ready</h3>
+        <ul id="guide-summary" class="guide-summary"></ul>
+        <div class="setting-actions">
+          <button id="guide-finish" class="hud-btn primary" type="button" data-press="setup_finish">Start listening</button>
+        </div>
+        <p class="guide-note" data-note="done"></p>
+      </section>
+
+      <footer class="guide-nav">
+        <button id="guide-back" class="hud-btn" type="button">Back</button>
+        <span id="guide-busy" class="guide-busy" aria-live="polite"></span>
+        <button id="guide-next" class="hud-btn primary" type="button">Next</button>
+      </footer>
+    </div>
+  </div>
 
   <script src="screen.js"></script>
 </body>

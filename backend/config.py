@@ -15,11 +15,9 @@ AUDIT_LOG = _base / "jarvis" / "audit.jsonl"
 # Capped at about 3 MB in total (1 MB plus two older copies).
 APP_LOG = _base / "jarvis" / "jarvis.log"
 
-# Short name -> full path of the program. Add apps one at a time, with full paths.
-ALLOWED_APPS = {
-    "notepad": r"C:\Windows\System32\notepad.exe",
-    "calculator": r"C:\Windows\System32\calc.exe",
-}
+# Apps: any app in your Start menu can be opened by name, except command lines, script hosts,
+# admin tools and the like. That blocked list is security code, so it lives in
+# backend/tools/apps.py rather than here.
 
 # The only folders the file tools may touch, by name. Remove a name to keep J.A.R.V.I.S out of it.
 # "workspace" is the folder above; the others are found where Windows really keeps them (even if
@@ -42,7 +40,7 @@ USER_ADDRESS = "sir"
 # Say a short greeting ("Good morning, sir. All systems are online.") when it starts.
 GREETING_ON_START = True
 # Answer out loud when you say "hey jarvis" ("Yes, sir?"), then listen. False = only the chime.
-# The replies are prepared once at startup (in memory), so they play straight away.
+# No voice audio is cached, so each reply is fetched fresh and streamed (about a second).
 WAKE_REPLY = True
 # Before answering, wait this long. If you carry straight on ("hey jarvis, open notepad") it stays
 # quiet and takes the whole sentence; if you pause, it says "Yes, sir?".
@@ -61,7 +59,11 @@ MODELS_DIR = _base / "jarvis" / "models"
 
 # Part of the microphone's name, or None for the Windows default input. The Windows default on
 # this laptop is a virtual mic (AudioRelay), so the built-in microphone is named here.
+# A microphone picked in the setup guide on the screen takes the place of this one.
 MIC_DEVICE = "Microphone Array"
+
+# Choices made on the screen that are not secrets (the microphone, whether setup is done).
+PREFERENCES = _base / "jarvis" / "preferences.json"
 
 # Tuned on your own voice (26 tries): 0.25 with patience 1 caught 25 of 26, and a minute of
 # normal talk never scored above 0.006. Raise the threshold if it wakes by mistake.
@@ -76,6 +78,15 @@ WAKE_SPEECH_CHECK = True
 # the audit log shows "wake_rejected": lower these a little.
 WAKE_SPEECH_CONFIDENCE = 0.7     # how sure the local voice detector must be, per 32 ms frame
 WAKE_MIN_SPEECH_SECONDS = 0.4    # at least this much voice in the last ~2 seconds
+
+# Your voice check: once you have taught J.A.R.V.I.S your voice, "hey jarvis" only counts when it
+# sounds like you. Teach it with:  python -m backend.voice.enroll teach
+# The voiceprint holds numbers only (never audio) and stays on this laptop.
+VOICE_CHECK = True               # use your voiceprint when there is one
+VOICEPRINT = _base / "jarvis" / "voiceprint.json"
+# If the voice check can't run (model missing, voiceprint changed): False = carry on with the wake
+# word alone and show a warning; True = ignore every "hey jarvis" until it is fixed.
+VOICE_CHECK_STRICT = False
 
 # Double clap. OFF by default: knocks, desk taps and doors look like claps to a laptop mic (13 of
 # 17 clap wake-ups in 4 days were false). CLAP_MIN_LEVEL is how loud a clap must be; your claps

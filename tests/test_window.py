@@ -73,13 +73,67 @@ def test_pump_applies_updates_and_closes_when_the_pipe_ends():
     assert w.restored == 1 and w.destroyed
 
 
-def test_the_page_can_only_ask_to_pause():
+def test_the_page_can_only_press_the_listed_buttons():
+    import inspect
+
     out = io.StringIO()
     api = window._Api(out, threading.Lock())
-    api.toggle_pause()
-    assert json.loads(out.getvalue()) == {"cmd": "toggle_pause"}
     public = [n for n in dir(api) if not n.startswith("_")]
-    assert public == ["toggle_pause"]
+    assert set(public) == set(window.COMMANDS) | set(window.CHOICES)
+    for name in window.COMMANDS:
+        assert list(inspect.signature(getattr(api, name)).parameters) == []      # no data can be sent
+        out.seek(0), out.truncate()
+        getattr(api, name)()
+        assert json.loads(out.getvalue()) == {"cmd": name}
+
+
+def test_the_one_choice_sends_only_a_small_whole_number():
+    out = io.StringIO()
+    api = window._Api(out, threading.Lock())
+    api.setup_mic(3)
+    assert json.loads(out.getvalue()) == {"cmd": "setup_mic", "arg": 3}
+    for bad in (-1, 17, 2.0, True, "1", None, [1], {"a": 1}, 10**9):
+        out.seek(0), out.truncate()
+        api.setup_mic(bad)
+        assert out.getvalue() == "", bad
+
+
+def test_screen_buttons_match_the_backend_list():
+    from backend.settings import COMMANDS as SETTINGS
+    from backend.setup_guide import CHOICES, COMMANDS as SETUP
+
+    assert window.COMMANDS == {"toggle_pause", *SETTINGS, *SETUP}
+    assert window.CHOICES == CHOICES
+    js = (window.PAGE.parent / "screen.js").read_text(encoding="utf-8")
+    for name in window.COMMANDS - {"toggle_pause"}:
+        assert f'"{name}"' in js                    # the page's own list of buttons knows it
+
+
+def test_the_app_side_drops_bad_choices():
+    got, chosen = [], []
+
+    class Proc:
+        stdout = [json.dumps({"cmd": "setup_mic", "arg": 2}) + "\n",
+                  json.dumps({"cmd": "setup_mic", "arg": 99}) + "\n",
+                  json.dumps({"cmd": "setup_mic", "arg": "2"}) + "\n",
+                  json.dumps({"cmd": "toggle_pause", "arg": 1}) + "\n",      # a bare button with data: dropped
+                  json.dumps({"cmd": "teach_start", "arg": 1}) + "\n",
+                  json.dumps({"cmd": "setup_status"}) + "\n"]
+
+    link = window.ScreenLink(on_command=got.append, on_choice=lambda n, v: chosen.append((n, v)))
+    link._read(Proc())
+    assert chosen == [("setup_mic", 2)] and got == ["setup_status"]
+
+
+def test_setup_updates_reach_the_page():
+    js = to_js({"call": "setup", "args": [{"keys": {"gemini": True}, "mics": ["Windows default"], "mic": 0}]})
+    assert js.startswith("window.HUD && window.HUD.setup(...[")
+
+
+def test_teaching_updates_go_through_as_data():
+    js = to_js({"call": "teach", "args": [{"phase": "waiting", "done": 3, "of": 20, "message": "<b>x</b>"}]})
+    assert js.startswith("window.HUD && window.HUD.teach(...[") and "<b>x</b>" in js     # data, shown as text
+    assert to_js({"call": "teach", "args": [{}, {}]}) is None
 
 
 def test_page_is_a_local_file():
@@ -193,17 +247,18 @@ def test_second_open_brings_the_window_forward(link):
     assert len(procs) == 1 and procs[0].written[-1] == {"call": "focus"}
 
 
-def test_only_the_pause_command_is_accepted(link):
+def test_only_listed_commands_are_accepted(link):
     s, procs, commands = link
     s.open()
     proc = procs[0]
     for message in ({"cmd": "toggle_pause"}, {"cmd": "run_tool", "tool": "delete_file"}, {"cmd": "quit"},
-                    "garbage\n", ["toggle_pause"]):
+                    "garbage\n", ["toggle_pause"], {"cmd": "teach_start"}, {"cmd": "set_secret"},
+                    {"cmd": "TEACH_START"}):
         proc.reply(message)
     proc.reply({"cmd": "toggle_pause"})
-    assert wait_for(lambda: len(commands) == 2)
+    assert wait_for(lambda: len(commands) == 3)
     time.sleep(0.05)
-    assert commands == ["toggle_pause", "toggle_pause"]
+    assert commands == ["toggle_pause", "teach_start", "toggle_pause"]
 
 
 def test_sound_level_updates_are_rate_limited(link):
@@ -346,3 +401,13 @@ def test_real_screen_opens_and_takes_updates():
     finally:
         s.close()
     assert wait_for(lambda: not s.is_open, timeout=10)
+
+
+def test_voice_status_also_refreshes_the_system_lights(link):
+    s, procs, _ = link
+    s.open()
+    procs[0].reply({"event": "ready"})
+    assert wait_for(lambda: "setTimers" in calls(procs[0]))
+    before = calls(procs[0]).count("setSystems")
+    s.set_voice({"taught": True, "on": True})
+    assert calls(procs[0])[-2:] == ["setVoice", "setSystems"] and calls(procs[0]).count("setSystems") == before + 1
