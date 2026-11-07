@@ -18,7 +18,7 @@ from typing import Any, Callable
 
 from . import config
 from .voice.voiceprint import (AllChecks, SpeakerCheck, StrictCheck, Voiceprint, VoiceprintError,
-                               delete_voiceprint, load_voiceprint, save_voiceprint)
+                               delete_voiceprint, load_voiceprint, save_voiceprint, wake_bar)
 
 log = logging.getLogger("jarvis")
 
@@ -141,5 +141,9 @@ class VoiceSettings:
             return {"taught": False, "on": False}
         assistant = self._assistant()
         names = [n for n, _ in getattr(getattr(assistant, "voice_check", None), "_checks", [])]
-        return {"taught": True, "created": vp.created, "samples": vp.samples, "bar": round(vp.threshold, 2),
-                "on": SPEAKER in names and config.VOICE_CHECK, "strict": config.VOICE_CHECK_STRICT}
+        status = {"taught": True, "created": vp.created, "samples": vp.samples, "bar": round(wake_bar(vp), 2),
+                  "on": SPEAKER in names and config.VOICE_CHECK, "strict": config.VOICE_CHECK_STRICT}
+        if vp.wake is None and config.VOICE_WAKE_OWN_BAR:
+            status["message"] = ("Teach your voice again to get your own, stricter \"hey jarvis\" pass mark "
+                                 "(it stops music and videos waking J.A.R.V.I.S).")
+        return status

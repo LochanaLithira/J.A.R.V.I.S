@@ -21,7 +21,7 @@ import numpy as np
 
 from .enroll import SAMPLE_MIN_MATCH, SAMPLES, TIPS, windows_voices
 from .voiceprint import (CHECK_SECONDS, Voiceprint, VoiceprintError, calibrate, load_cohort, normalize,
-                         similarity)
+                         similarity, wake_bar)
 
 IDLE_SECONDS = 300
 
@@ -193,8 +193,9 @@ class TeachingSession:
                 {"message": "That was too short. Press Test to try again."}
         if self._mode == "test":
             score = similarity(numbers, np.array(self._current.centroid))
-            ok = score >= self._current.threshold
-            return "result", {"score": round(score, 3), "bar": round(self._current.threshold, 3), "recognised": ok,
+            bar = wake_bar(self._current)                # the same pass mark as a real "hey jarvis"
+            ok = score >= bar
+            return "result", {"score": round(score, 3), "bar": round(bar, 3), "recognised": ok,
                               "message": "That's you." if ok else "Not recognised as you."}
         if len(self._kept) >= 5 and similarity(numbers, normalize(np.mean(self._kept, axis=0))) < SAMPLE_MIN_MATCH:
             return "odd", "That didn't sound like the others (another voice or a noise?). Try again."
@@ -220,7 +221,7 @@ class TeachingSession:
         self._finish("result", saved=result.voiceprint is not None, message=result.message,
                      yours=[round(result.yours[0], 3), round(result.yours[1], 3)],
                      others=round(result.others, 3),
-                     bar=round(result.voiceprint.threshold, 3) if result.voiceprint else None)
+                     bar=round(wake_bar(result.voiceprint), 3) if result.voiceprint else None)
 
     def _finish(self, phase: str, **data: Any) -> None:
         with self._lock:

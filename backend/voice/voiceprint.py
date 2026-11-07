@@ -223,11 +223,15 @@ class Voiceprint:
     created: str = field(default_factory=lambda: time.strftime("%Y-%m-%d %H:%M"))
     model: str = SPEAKER_MODEL_SHA256
     version: int = VOICEPRINT_VERSION
+    wake: float | None = None          # your own "hey jarvis" pass mark (None: taught before it existed)
 
     def to_json(self) -> str:
-        return json.dumps({"version": self.version, "model": self.model, "created": self.created,
-                           "samples": self.samples, "threshold": round(self.threshold, 4),
-                           "centroid": [round(x, 6) for x in self.centroid]}, indent=1)
+        data = {"version": self.version, "model": self.model, "created": self.created,
+                "samples": self.samples, "threshold": round(self.threshold, 4)}
+        if self.wake is not None:
+            data["wake_bar"] = round(self.wake, 4)
+        data["centroid"] = [round(x, 6) for x in self.centroid]
+        return json.dumps(data, indent=1)
 
     @classmethod
     def from_json(cls, text: str) -> "Voiceprint":
@@ -236,6 +240,7 @@ class Voiceprint:
             centroid = tuple(float(x) for x in data["centroid"])
             threshold, samples = float(data["threshold"]), int(data["samples"])
             version, model, created = int(data["version"]), str(data["model"]), str(data["created"])
+            wake = None if data.get("wake_bar") is None else float(data["wake_bar"])
         except (ValueError, KeyError, TypeError):
             raise VoiceprintError("The voiceprint file is damaged. Teach J.A.R.V.I.S your voice again.") from None
         if version != VOICEPRINT_VERSION:
@@ -243,9 +248,10 @@ class Voiceprint:
         if model != SPEAKER_MODEL_SHA256:
             raise VoiceprintError("The voiceprint was made for a different model. Teach J.A.R.V.I.S your voice again.")
         if (len(centroid) != EMBEDDING_SIZE or not all(math.isfinite(x) for x in centroid)
-                or not 0.0 < threshold < 1.0 or not 1 <= samples <= 100):
+                or not 0.0 < threshold < 1.0 or not 1 <= samples <= 100
+                or (wake is not None and not threshold <= wake < 1.0)):
             raise VoiceprintError("The voiceprint file is damaged. Teach J.A.R.V.I.S your voice again.")
-        return cls(tuple(normalize(np.array(centroid))), threshold, samples, created, model, version)
+        return cls(tuple(normalize(np.array(centroid))), threshold, samples, created, model, version, wake)
 
 
 def _digest(text: str) -> str:
@@ -376,9 +382,22 @@ def voice_numbers(model: SpeakerModel, audio: np.ndarray, vad: Callable[[np.ndar
     return model.embed(speech_only(audio[-n:] if last else audio[:n], vad))
 
 
+def wake_bar(voiceprint: Voiceprint) -> float:
+    """The pass mark for "hey jarvis": your own one, worked out when you taught your voice (halfway
+    between the closest other voice and your own lowest sample), when VOICE_WAKE_OWN_BAR is on in
+    config.py. Voiceprints taught before it existed, or with it off, use the voiceprint's bar.
+    Spoken commands always use the voiceprint's bar: they score lower than "hey jarvis"."""
+    from .. import config
+
+    if getattr(config, "VOICE_WAKE_OWN_BAR", True) and voiceprint.wake is not None:
+        return max(voiceprint.threshold, voiceprint.wake)
+    return voiceprint.threshold
+
+
 class SpeakerCheck:
     """Callable for Triggers' voice check: True when the speech just before the wake-up sounds
-    like you. `judge` checks a whole spoken command the same way."""
+    like you (scored against wake_bar). `judge` checks a whole spoken command against the
+    voiceprint's own bar."""
 
     def __init__(self, model: SpeakerModel, voiceprint: Voiceprint, on_score: Callable[[float], None] | None = None,
                  vad: Callable[[np.ndarray], float] | None = None):
@@ -420,7 +439,7 @@ class SpeakerCheck:
                 self.on_score(s)
             except Exception:
                 pass
-        return s >= self._vp.threshold
+        return s >= wake_bar(self._vp)
 
 
 def command_judge(check: object) -> Callable[[np.ndarray], tuple[str, float | None]] | None:
@@ -533,7 +552,11 @@ def calibrate(yours: list[np.ndarray], others: list[np.ndarray], copies: list[np
         return Calibration(None, (own_low, own_high), other_high,
                            "Your voice and other people's voices came out too alike, so nothing was saved. "
                            "Try again somewhere quieter, a little closer to the microphone.")
-    vp = Voiceprint(tuple(centroid), bar, len(yours))
+    # "hey jarvis" must reach halfway between the closest other voice and your own lowest sample:
+    # a recorded voice from speakers can score above every clean recording in the shipped set.
+    wake = max(bar, (other_high + own_low) / 2)
+    vp = Voiceprint(tuple(centroid), bar, len(yours), wake=wake)
     return Calibration(vp, (own_low, own_high), other_high,
                        f"Your voice scored {own_low:.2f}-{own_high:.2f}. Out of {len(scores)} other "
-                       f"people's voices, the closest reached {other_high:.2f}; the bar is {bar:.2f}.", bar)
+                       f"people's voices, the closest reached {other_high:.2f}. \"Hey jarvis\" must reach "
+                       f"{wake:.2f}; commands {bar:.2f}.", bar)
