@@ -84,6 +84,12 @@ WAKE_MIN_SPEECH_SECONDS = 0.4    # at least this much voice in the last ~2 secon
 # The voiceprint holds numbers only (never audio) and stays on this laptop.
 VOICE_CHECK = True               # use your voiceprint when there is one
 VOICEPRINT = _base / "jarvis" / "voiceprint.json"
+# Give "hey jarvis" its own, stricter pass mark, worked out for YOUR voice when you teach it:
+# halfway between the closest other voice and your own lowest sample, saved in your voiceprint.
+# (Music and videos through the speakers can score above the plain bar and wake it by mistake.)
+# Spoken commands keep the plain bar: other sentences score lower than "hey jarvis".
+# Voiceprints taught before this existed keep working with the plain bar until taught again.
+VOICE_WAKE_OWN_BAR = True
 # If the voice check can't run (model missing, voiceprint changed): False = carry on with the wake
 # word alone and show a warning; True = ignore every "hey jarvis" until it is fixed.
 VOICE_CHECK_STRICT = False

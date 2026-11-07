@@ -24,7 +24,7 @@ from .other_voices import other_voices
 from .voiceprint import (CHECK_SECONDS, Calibration, SpeakerModel, VoiceprintError, calibrate,
                          delete_voiceprint, download_speaker_model, load_cohort, load_voiceprint,
                          noisy_copy, normalize, save_voiceprint, similarity, speaker_model_path,
-                         voice_numbers)
+                         voice_numbers, wake_bar)
 
 SAMPLES = 20
 MAX_TRIES = 40
@@ -237,7 +237,8 @@ def main(argv: list[str] | None = None) -> int:
             speaker_model_path(config.MODELS_DIR)
             vp = load_voiceprint(config.VOICEPRINT, get_secret)
             print("No voiceprint yet. Teach one with: python -m backend.voice.enroll teach" if vp is None else
-                  f"Voiceprint from {vp.created}, {vp.samples} samples, bar {vp.threshold:.2f}. "
+                  f"Voiceprint from {vp.created}, {vp.samples} samples, bar {vp.threshold:.2f} "
+                  f"(\"hey jarvis\" pass mark {wake_bar(vp):.2f}). "
                   f"Voice check is {'on' if config.VOICE_CHECK else 'off (VOICE_CHECK in config.py)'}.")
         elif command == "delete":
             print("Voiceprint deleted." if delete_voiceprint(config.VOICEPRINT, delete_secret) else "There was no voiceprint.")
@@ -277,8 +278,8 @@ def main(argv: list[str] | None = None) -> int:
                     audio = np.concatenate(moment)
                     score = similarity(voice_numbers(model, audio, trim), np.array(vp.centroid))
                     audio = moment = None
-                    print(f"  score {score:.2f} (bar {vp.threshold:.2f}): "
-                          + ("that's you." if score >= vp.threshold else "not recognised."))
+                    print(f"  score {score:.2f} (pass mark {wake_bar(vp):.2f}): "
+                          + ("that's you." if score >= wake_bar(vp) else "not recognised."))
             del probe
     except KeyboardInterrupt:
         print("\nStopped. Nothing was saved.")

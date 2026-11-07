@@ -2,6 +2,7 @@
 or kept: the tests use made-up voice numbers, and Windows' synthetic voices for the real model."""
 import hashlib
 import json
+import math
 import sys
 
 import numpy as np
@@ -220,6 +221,60 @@ def chunks(seconds=2.0):
 def test_your_voice_passes_and_others_do_not():
     assert SpeakerCheck(FakeModel(like_me), a_voiceprint())(chunks())
     assert not SpeakerCheck(FakeModel(someone_else), a_voiceprint())(chunks())
+
+
+def voice_scoring(score):
+    """A voice whose similarity to ME is exactly `score`."""
+    other = rng.normal(size=256)
+    other = unit(other - np.dot(other, ME) * np.asarray(ME))
+    return unit(score * np.asarray(ME) + math.sqrt(1 - score * score) * other)
+
+
+def test_wake_uses_your_own_pass_mark(monkeypatch):
+    monkeypatch.setattr(config, "VOICE_WAKE_OWN_BAR", True)
+    vp = Voiceprint(tuple(ME), 0.27, 20, wake=0.4255)        # your numbers: others 0.26, yours 0.59
+    assert vpm.wake_bar(vp) == 0.4255
+    # 14:46: a recorded voice scored 0.33 against the 0.27 bar and woke J.A.R.V.I.S
+    assert not SpeakerCheck(FakeModel(voice_scoring(0.33)), vp)(chunks())
+    assert SpeakerCheck(FakeModel(voice_scoring(0.47)), vp)(chunks())  # your lowest real wake-up
+
+
+def test_commands_keep_the_plain_bar(monkeypatch):
+    monkeypatch.setattr(config, "VOICE_WAKE_OWN_BAR", True)
+    check = SpeakerCheck(FakeModel(voice_scoring(0.33)), Voiceprint(tuple(ME), 0.27, 20, wake=0.4255))
+    verdict, score = check.judge(np.zeros(4 * 16000, np.int16))
+    assert verdict == "you" and abs(score - 0.33) < 1e-6
+
+
+def test_older_voiceprints_and_the_switch_use_the_plain_bar(monkeypatch):
+    monkeypatch.setattr(config, "VOICE_WAKE_OWN_BAR", True)
+    assert vpm.wake_bar(a_voiceprint(threshold=0.27)) == 0.27           # taught before the pass mark
+    monkeypatch.setattr(config, "VOICE_WAKE_OWN_BAR", False)
+    assert vpm.wake_bar(Voiceprint(tuple(ME), 0.27, 20, wake=0.43)) == 0.27
+
+
+def test_the_pass_mark_is_saved_and_checked():
+    vp = Voiceprint(tuple(ME), 0.27, 20, wake=0.43)
+    back = Voiceprint.from_json(vp.to_json())
+    assert back.wake == 0.43 and back.threshold == 0.27
+    old = json.loads(a_voiceprint(threshold=0.27).to_json())
+    assert "wake_bar" not in old and Voiceprint.from_json(json.dumps(old)).wake is None
+    for bad in (0.2, 1.0, "x", float("nan")):                          # below the bar, too high, junk
+        data = json.loads(vp.to_json())
+        data["wake_bar"] = bad
+        with pytest.raises(VoiceprintError):
+            Voiceprint.from_json(json.dumps(data))
+
+
+def test_teaching_sets_the_pass_mark_halfway():
+    yours = [like_me(0.15) for _ in range(20)]
+    others = [someone_else() for _ in range(80)]
+    result = vpm.calibrate(yours, others)
+    vp = result.voiceprint
+    assert vp is not None
+    expected = (result.others + result.yours[0]) / 2
+    assert abs(vp.wake - max(vp.threshold, expected)) < 1e-9
+    assert vp.threshold <= vp.wake < result.yours[0]                    # above the bar, below you
 
 
 def test_only_the_last_moment_is_compared():

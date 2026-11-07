@@ -364,6 +364,20 @@ def test_status_without_a_voiceprint():
     assert shown[-1] == {"taught": False, "on": False}
 
 
+def test_older_voiceprints_are_asked_to_teach_again(monkeypatch):
+    monkeypatch.setattr(config, "VOICEPRINT", config.VOICEPRINT.parent / "test-vp-does-not-exist.json")
+    s, shown, secrets, _ = make_settings()
+    from backend.voice import voiceprint as vpm
+
+    old = Voiceprint(tuple(ME), 0.27, 20)
+    new = Voiceprint(tuple(ME), 0.27, 20, wake=0.43)
+    monkeypatch.setattr("backend.settings.load_voiceprint", lambda path, get: old)
+    assert "Teach your voice again" in s.status()["message"] and s.status()["bar"] == 0.27
+    monkeypatch.setattr("backend.settings.load_voiceprint", lambda path, get: new)
+    assert "message" not in s.status() and s.status()["bar"] == 0.43
+    assert vpm.wake_bar(new) == 0.43
+
+
 def test_saving_switches_the_check_on_without_a_restart():
     from backend.voice.voiceprint import AllChecks
 
