@@ -411,6 +411,25 @@ def pick_microphone(name: str | None, devices: list[dict] | None = None,
     return matches[0]
 
 
+MAX_MICROPHONES = 16
+
+
+def list_microphones(devices: list[dict] | None = None, hostapis: list[dict] | None = None) -> list[str]:
+    """The names of the microphones you can pick on the screen (at most 16), as Windows' MME audio
+    system names them: pick_microphone finds each one again by that name."""
+    if devices is None or hostapis is None:
+        import sounddevice as sd
+
+        devices, hostapis = list(sd.query_devices()), list(sd.query_hostapis())
+    names: list[str] = []
+    for d in devices:
+        name = str(d.get("name", "")).strip()
+        if (d.get("max_input_channels", 0) > 0 and hostapis[d["hostapi"]]["name"] == "MME" and name
+                and "sound mapper" not in name.lower() and name.isprintable() and name not in names):
+            names.append(name[:200])
+    return names[:MAX_MICROPHONES]
+
+
 class Microphone:
     """Streams 80 ms slices from the microphone. The sound callback never blocks: if the
     listener falls behind, the oldest slices are dropped."""

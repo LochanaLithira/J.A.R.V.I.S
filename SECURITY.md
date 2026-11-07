@@ -47,6 +47,7 @@ Nothing else is sent anywhere. In particular:
 | API keys | Windows Credential Manager | Never stored in files, logged, printed, or put in error messages. A plain-text fallback keyring is refused. |
 | Audit log | `%LOCALAPPDATA%\jarvis\audit.jsonl` | Each command's text, the AI's proposals and their arguments (clipped to 200 characters), decisions, wake-ups, and upload lengths. Hash-chained so edits are detectable (`verify` in the console). **It contains your commands**: treat it as private. |
 | Error log | `%LOCALAPPDATA%\jarvis\jarvis.log` | Error types, fixed messages and timings only, never your words. Capped at about 3 MB. |
+| Preferences | `%LOCALAPPDATA%\jarvis\preferences.json` | Your microphone's name and whether setup is finished. Nothing secret. Checked when read: anything unexpected is ignored. |
 | Models | `%LOCALAPPDATA%\jarvis\models` | The four ONNX model files, fingerprint-checked on every load. |
 | Workspace | `~\jarvis_workspace` | Notes, plus `trash\` for "deleted" files, which can be moved back. |
 | Recent conversation | Memory only | Shown on the screen while J.A.R.V.I.S. runs; gone when it quits. Timers are also memory only. |
@@ -88,7 +89,8 @@ Nothing else is sent anywhere. In particular:
 
 **Screen**
 - Separate process; loaded from local files only, with a strict Content-Security-Policy; text is always shown as text, never as HTML.
-- It accepts only a fixed list of display updates, and can send back only bare button names: pause or resume, and the Settings page's voice buttons (teach start / record / redo / cancel, test, forget, status). No text or data can be sent, so it can't run tools or reach anything else. Teaching progress shown on it holds no audio and no voice numbers.
+- It accepts only a fixed list of display updates, and can send back only bare button names: pause or resume, the Settings page's voice buttons (teach start / record / redo / cancel, test, forget, status) and the setup guide's buttons. The one exception is picking a microphone, which sends a single whole number (0-16): that microphone's place in the list J.A.R.V.I.S. sent. It is checked in the window, on the app's side of the pipe, and against that list again. No text can be sent, so the screen can't run tools or reach anything else. Teaching progress shown on it holds no audio and no voice numbers.
+- **API keys never touch the screen.** The setup guide's "Add key" opens the key box (`frontend/keybox.py`), a native window in its own short-lived process with the text shown as dots. The key travels back over that process's private pipe, is validated, and goes into Windows Credential Manager. The screen is only told whether each key is set. "Get a free key" opens one of three fixed HTTPS addresses written in the code. "Start with Windows" runs `scripts/install_autostart.ps1` with its fixed switches only.
 - "Forget my voice" weakens security, so it needs the same Y-keypress window as deleting a file.
 - Private mode, no downloads, no right-click menu, no developer tools.
 

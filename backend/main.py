@@ -35,7 +35,7 @@ from collections import deque
 from enum import Enum
 from typing import Any, Callable
 
-from . import config
+from . import config, preferences
 from .brain import Brain, BrainError, GeminiBrain, Turn
 from .credentials import CredentialError, get_secret
 from .flow import Flow, FlowError
@@ -47,10 +47,10 @@ from .voice.keepalive import warm_all
 from .voice.speak import FishSpeaker, Voice
 from .voice.style import Style
 from .voice.triggers import (ALARM_CHIME, CHUNK, SAMPLE_RATE, ClapDetector, Microphone, TriggerError, Triggers,
-                             WakeEvent, WakeWordDetector, pick_microphone, play_chime, play_close_chime,
-                             play_done_chime)
+                             WakeEvent, WakeWordDetector, download_models, list_microphones, pick_microphone,
+                             play_chime, play_close_chime, play_done_chime, verify_models)
 from .voice.voiceprint import (AllChecks, SpeakerCheck, SpeakerModel, StrictCheck, VoiceprintError, command_judge,
-                               load_voiceprint)
+                               download_speaker_model, load_voiceprint, speaker_model_path)
 
 log = logging.getLogger("jarvis")
 
@@ -88,6 +88,7 @@ def make_brain_getter() -> Callable[[], Brain]:
                                      address=config.USER_ADDRESS))
         return cache[0]
 
+    get.reset = cache.clear                 # a new key was stored: build the brain again on next use
     return get
 
 
@@ -99,6 +100,11 @@ def make_flow_getter(gate: Gate, get_brain: Callable[[], Brain]) -> Callable[[],
             cache.append(Flow(get_brain(), gate))
         return cache[0]
 
+    def reset() -> None:
+        cache.clear()
+        getattr(get_brain, "reset", lambda: None)()
+
+    get.reset = reset
     return get
 
 
@@ -753,6 +759,63 @@ def make_voice_settings(get_assistant: Callable[[], Any], screen: Any, confirm: 
     return settings
 
 
+def models_ready() -> bool:
+    try:
+        verify_models(config.MODELS_DIR)
+        speaker_model_path(config.MODELS_DIR)
+        return True
+    except (TriggerError, VoiceprintError):
+        return False
+
+
+def download_all_models() -> None:
+    """The wake-word models and the voice-check model, each saved only if its fingerprint matches."""
+    download_models(config.MODELS_DIR)
+    download_speaker_model(config.MODELS_DIR)
+
+
+def make_setup_guide(screen: Any, get_assistant: Callable[[], Any], start_listening: Callable[[], str],
+                     on_key_saved: Callable[[str], None]) -> Any:
+    """The setup guide's buttons, wired to the key box, the model downloads, the microphones and
+    the autostart script."""
+    import functools
+    import webbrowser
+
+    from frontend.keybox import ask_key
+    from .credentials import set_secret
+    from .setup_guide import SetupGuide, mic_levels
+
+    def pause(on: bool) -> None:
+        a = get_assistant()
+        if a is not None:
+            a.set_teaching(on)
+
+    def voice_works() -> tuple[bool, str]:
+        """Fish Audio says one short line, so you hear that the voice works."""
+        speaker = FishSpeaker(lambda: get_secret("fish_api_key"), voice_id=config.FISH_VOICE_ID)
+        pause(True)
+        try:
+            ok = speaker.speak(f"Voice systems online, {config.USER_ADDRESS}.", wait=True)
+        finally:
+            pause(False)
+        return ok, ("" if ok else "refused")
+
+    def is_listening() -> bool:
+        a = get_assistant()
+        return a is not None and a.status is not Status.PROBLEM
+
+    return SetupGuide(screen.setup, get_secret=get_secret, set_secret=set_secret, ask_key=ask_key,
+                      on_key_saved=on_key_saved, open_url=webbrowser.open, voice_check=voice_works,
+                      models_ready=models_ready, download_models=download_all_models,
+                      list_mics=list_microphones, current_mic=preferences.microphone,
+                      save_mic=lambda name: preferences.update(mic=name),
+                      mic_levels=functools.partial(mic_levels, pick=pick_microphone, mic_factory=Microphone,
+                                                   level=sound_level),
+                      voice_taught=lambda: config.VOICEPRINT.is_file(), start_listening=start_listening,
+                      is_listening=is_listening, pause=pause, load_prefs=preferences.load,
+                      update_prefs=preferences.update, level=screen.set_level)
+
+
 def build_assistant(audit: Any, get_flow: Callable[[], Flow] | None, voice: Voice | None, *,
                     out: Callable[[str], None] | None = None, show_text: Callable[[str], Any] | None = None,
                     on_status: Callable[[Status, str], None] | None = None,
@@ -760,8 +823,8 @@ def build_assistant(audit: Any, get_flow: Callable[[], Flow] | None, voice: Voic
                     on_event: Callable[[str, dict], None] | None = None,
                     on_level: Callable[[float], None] | None = None,
                     style: Style | None = None) -> Assistant:
-    """Everything the loop needs, from config.py. Raises TriggerError if the models or the
-    microphone named in config.py are missing."""
+    """Everything the loop needs, from config.py (and the microphone picked in the setup guide).
+    Raises TriggerError if the models or the microphone are missing."""
     wake = WakeWordDetector(config.MODELS_DIR)
     clap = None
     if config.CLAP_ENABLED:
@@ -777,7 +840,7 @@ def build_assistant(audit: Any, get_flow: Callable[[], Flow] | None, voice: Voic
                         config.WAKE_COOLDOWN_SECONDS, audit=audit,
                         voice_check=AllChecks(checks) if checks else None)
     return Assistant(triggers, make_speech(audit, on_recorded=play_done_chime), get_flow, voice,
-                     pick_microphone(config.MIC_DEVICE), show_text=show_text, on_status=on_status,
+                     pick_microphone(preferences.microphone()), show_text=show_text, on_status=on_status,
                      on_notice=on_notice, out=out, warm=warm_all,
                      follow_up_on_question=config.FOLLOW_UP_ON_QUESTION,
                      follow_up_seconds=config.FOLLOW_UP_SECONDS, follow_up_max_turns=config.FOLLOW_UP_MAX_TURNS,
@@ -987,10 +1050,21 @@ def main() -> int:
     def on_command(cmd: str) -> None:
         if cmd == "toggle_pause":
             toggle_pause()
+        elif cmd.startswith("setup_") and "g" in settings_box:
+            settings_box["g"].handle(cmd)
         elif "s" in settings_box:
             settings_box["s"].handle(cmd)
 
-    screen = ScreenLink(on_command=on_command, get_systems=systems, get_timers=timers.snapshot)
+    def on_choice(cmd: str, value: int) -> None:
+        if "g" in settings_box:
+            settings_box["g"].handle(cmd, value)
+
+    def on_screen_ready() -> None:
+        if "g" in settings_box:
+            settings_box["g"].screen_ready()
+
+    screen = ScreenLink(on_command=on_command, get_systems=systems, get_timers=timers.snapshot,
+                        on_choice=on_choice, on_ready=on_screen_ready)
     settings_box["s"] = make_voice_settings(lambda: holder.get("a"), screen, popup_confirm)
     feed_status, feed_event = screen_feed(screen)
     tray = Tray(on_toggle_pause=toggle_pause,
@@ -1007,26 +1081,52 @@ def main() -> int:
         if not screen.is_open:
             show_message(text)
 
-    try:
-        holder["a"] = build_assistant(gate.audit, get_flow, voice, show_text=show_text, on_status=on_status,
-                                      on_notice=lambda m: tray.notify("J.A.R.V.I.S", m),
-                                      on_event=feed_event, on_level=screen.set_level)
-    except TriggerError as exc:
-        log.warning("cannot listen: %s", exc)
-        on_status(Status.PROBLEM, str(exc))
-        tray.notify("J.A.R.V.I.S can't listen yet", str(exc))
-    if "a" in holder:
-        timers.on_fire = holder["a"].announce
-    else:                                # no listening loop: still ring, label on screen only
-        timers.on_fire = lambda label: (tray.notify("J.A.R.V.I.S", "Your timer is done."),
-                                        show_message(f"Timer done: {label}") if label else None)
+    restart_lock = threading.Lock()
+
+    def start_listening(first: bool = False) -> str:
+        """Build the listening loop and start it, replacing a running one (after the setup guide
+        changes the microphone or downloads the models). Returns a problem to show, or ""."""
+        with restart_lock:
+            old = holder.pop("a", None)
+            paused = old is not None and old.paused
+            if old is not None:
+                old.stop()
+            problem = ""
+            try:
+                holder["a"] = build_assistant(gate.audit, get_flow, voice, show_text=show_text, on_status=on_status,
+                                              on_notice=lambda m: tray.notify("J.A.R.V.I.S", m),
+                                              on_event=feed_event, on_level=screen.set_level)
+            except TriggerError as exc:
+                log.warning("cannot listen: %s", exc)
+                problem = str(exc)
+                on_status(Status.PROBLEM, problem)
+                if first:
+                    tray.notify("J.A.R.V.I.S can't listen yet", problem)
+            if "a" in holder:
+                timers.on_fire = holder["a"].announce
+                if paused:
+                    holder["a"].pause()
+                holder["a"].start()
+            else:                            # no listening loop: still ring, label on screen only
+                timers.on_fire = lambda label: (tray.notify("J.A.R.V.I.S", "Your timer is done."),
+                                                show_message(f"Timer done: {label}") if label else None)
+            return problem
+
+    def key_saved(name: str) -> None:
+        if name == "gemini_api_key":
+            get_flow.reset()                 # the next command uses the new key
+
+    settings_box["g"] = make_setup_guide(screen, lambda: holder.get("a"), start_listening, key_saved)
+    start_listening(first=True)
+    guide_needed = settings_box["g"].needed()
     problems = startup_checks()
-    if problems:
+    if guide_needed:                         # first run, or something essential is missing
+        settings_box["g"].request_open()
+        screen.open()
+    elif problems:
         tray.notify("J.A.R.V.I.S needs setting up", "\n".join(problems))
-    if "a" in holder:
-        holder["a"].start()
-        if config.GREETING_ON_START:
-            holder["a"].say_line(Style(config.USER_ADDRESS).greeting())
+    if "a" in holder and config.GREETING_ON_START and not guide_needed:
+        holder["a"].say_line(Style(config.USER_ADDRESS).greeting())
     try:
         tray.run()                       # the Windows message loop; returns when you choose Quit
     finally:

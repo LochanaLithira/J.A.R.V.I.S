@@ -9,8 +9,11 @@ How it stays safe:
 - J.A.R.V.I.S -> window: only a fixed list of screen updates (HUD calls) is accepted, and every
   value is passed as JSON, never pasted into code. The page itself shows text with textContent,
   never as HTML, and its Content-Security-Policy blocks outside scripts and connections.
-- window -> J.A.R.V.I.S: only the bare command names in COMMANDS (pause, and the Settings page's
-  voice buttons), with no data attached. The window cannot run tools or send any text.
+- window -> J.A.R.V.I.S: only the bare command names in COMMANDS (pause, the Settings page's
+  voice buttons and the setup guide's buttons), with no data attached. The one exception is in
+  CHOICES: picking a microphone sends one small whole number, its place in the list J.A.R.V.I.S
+  sent, checked here and again on the app's side. The window cannot run tools or send any text,
+  and API keys never pass through it (they are typed into a separate native box).
 - Private mode (nothing stored), no downloads, no right-click menu, no developer tools.
 
     python -m frontend.window      (started by the app; reads updates on stdin)
@@ -32,11 +35,21 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 # The only screen calls J.A.R.V.I.S may make, with how many arguments each takes.
 ALLOWED_CALLS = {"setState": 2, "setLevel": 1, "addMessage": 3, "setTimers": 1, "addActivity": 1, "setSystems": 1,
-                 "teach": 1, "setVoice": 1}
+                 "teach": 1, "setVoice": 1, "setup": 1}
 MAX_LINE_CHARS = 200_000
 # Every button the page has. Kept in step with backend/settings.py (this side never imports it).
 COMMANDS = frozenset({"toggle_pause", "teach_start", "teach_record", "teach_redo", "teach_cancel", "voice_test",
-                      "voice_forget", "voice_status"})
+                      "voice_forget", "voice_status",
+                      # the setup guide (backend/setup_guide.py)
+                      "setup_status", "setup_key_gemini", "setup_key_groq", "setup_key_fish", "setup_get_gemini",
+                      "setup_get_groq", "setup_get_fish", "setup_test_keys", "setup_models", "setup_mic_test",
+                      "setup_autostart_on", "setup_autostart_off", "setup_finish"})
+# Buttons that carry one small whole number: the name, and the number must be below this.
+CHOICES = {"setup_mic": 17}
+
+
+def valid_choice(name: Any, value: Any) -> bool:
+    return name in CHOICES and type(value) is int and 0 <= value < CHOICES[name]
 
 
 def to_js(message: Any) -> str | None:
@@ -68,6 +81,10 @@ class _Api:
         if name in COMMANDS:
             _write_line(self._out, self._lock, {"cmd": name})
 
+    def _choose(self, name: str, value: Any) -> None:
+        if valid_choice(name, value):
+            _write_line(self._out, self._lock, {"cmd": name, "arg": value})
+
     def toggle_pause(self) -> None:
         self._press("toggle_pause")
 
@@ -91,6 +108,49 @@ class _Api:
 
     def voice_status(self) -> None:
         self._press("voice_status")
+
+    # ---- the setup guide ----
+    def setup_status(self) -> None:
+        self._press("setup_status")
+
+    def setup_key_gemini(self) -> None:
+        self._press("setup_key_gemini")
+
+    def setup_key_groq(self) -> None:
+        self._press("setup_key_groq")
+
+    def setup_key_fish(self) -> None:
+        self._press("setup_key_fish")
+
+    def setup_get_gemini(self) -> None:
+        self._press("setup_get_gemini")
+
+    def setup_get_groq(self) -> None:
+        self._press("setup_get_groq")
+
+    def setup_get_fish(self) -> None:
+        self._press("setup_get_fish")
+
+    def setup_test_keys(self) -> None:
+        self._press("setup_test_keys")
+
+    def setup_models(self) -> None:
+        self._press("setup_models")
+
+    def setup_mic_test(self) -> None:
+        self._press("setup_mic_test")
+
+    def setup_autostart_on(self) -> None:
+        self._press("setup_autostart_on")
+
+    def setup_autostart_off(self) -> None:
+        self._press("setup_autostart_off")
+
+    def setup_finish(self) -> None:
+        self._press("setup_finish")
+
+    def setup_mic(self, index: Any = None) -> None:
+        self._choose("setup_mic", index)
 
 
 def _write_line(out: TextIO, lock: threading.Lock, message: dict) -> None:
@@ -182,8 +242,11 @@ class ScreenLink:
     def __init__(self, on_command: Callable[[str], None] | None = None,
                  get_systems: Callable[[], list[dict]] | None = None,
                  get_timers: Callable[[], list[dict]] | None = None,
-                 launcher: Callable[[], Any] = _launch):
+                 launcher: Callable[[], Any] = _launch,
+                 on_choice: Callable[[str, int], None] | None = None,
+                 on_ready: Callable[[], None] | None = None):
         self._on_command, self._get_systems, self._get_timers = on_command, get_systems, get_timers
+        self._on_choice, self._on_ready = on_choice, on_ready
         self._launcher = launcher
         self._proc: Any = None
         self._lock = threading.Lock()
@@ -238,6 +301,17 @@ class ScreenLink:
             if message.get("event") == "ready":
                 self._ready = True
                 self._snapshot()
+                if self._on_ready is not None:
+                    try:
+                        self._on_ready()
+                    except Exception:
+                        pass
+            elif "arg" in message:
+                if valid_choice(message.get("cmd"), message["arg"]) and self._on_choice is not None:
+                    try:
+                        self._on_choice(message["cmd"], message["arg"])
+                    except Exception:
+                        pass
             elif message.get("cmd") in COMMANDS and self._on_command is not None:
                 try:
                     self._on_command(message["cmd"])
@@ -312,6 +386,11 @@ class ScreenLink:
     def teach(self, update: dict) -> None:
         """Progress while teaching your voice (numbers and short messages only)."""
         self._call("teach", update)
+
+    def setup(self, state: dict) -> None:
+        """What the setup guide shows: which keys are set (never the keys), models, microphones."""
+        self._call("setup", state)
+        self.refresh_systems()
 
     def set_voice(self, status: dict) -> None:
         """What the Settings page's Voice section shows. The bottom bar's lights follow too."""

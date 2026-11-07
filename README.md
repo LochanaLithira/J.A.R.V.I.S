@@ -61,6 +61,18 @@ python -m pip install -r requirements-dev.txt
 
 If the generated requirements files are unavailable, install from the input files with your preferred dependency compiler, or install the packages listed in `requirements.in` and `requirements-dev.in`.
 
+## Set up on the screen (easiest)
+
+Start J.A.R.V.I.S. (see [Run J.A.R.V.I.S. in the background](#run-jarvis-in-the-background)). The first time, its screen opens on a setup guide that walks you through:
+
+1. **Keys**: "Get a free key" opens the sign-up page for Gemini, Groq or Fish Audio. "Add key" opens a small separate window where you paste the key. It is shown as dots and saved straight into Windows Credential Manager; it never passes through the screen. "Test my keys" makes one read-only call to Gemini and Groq and has Fish Audio say a short line.
+2. **Models**: one button downloads them, and each file is checked against its fingerprint.
+3. **Microphone**: pick one from the list and test it. The test only measures loudness; nothing is recorded. Your choice is saved in `%LOCALAPPDATA%\jarvis\preferences.json` and takes the place of `MIC_DEVICE` in `config.py`.
+4. **Your voice**: the 20 "hey jarvis" samples (optional).
+5. **Start with Windows**: on or off.
+
+When you finish, J.A.R.V.I.S. starts listening straight away. The guide opens by itself until setup is finished and every key and model is present. Open it again any time from Settings > "Open the setup guide". The terminal commands below do the same jobs.
+
 ## Configure credentials
 
 J.A.R.V.I.S. stores supported API keys in Windows Credential Manager rather than in project files or environment variables.
@@ -271,11 +283,15 @@ Tests never touch your real Documents or Downloads, and never change your real S
 │   ├── flow.py           # Brain -> gate -> result workflow
 │   ├── gate/             # Validation, confirmation, execution, and audit logging
 │   ├── main.py           # Background app: listening loop, watchdog, startup
+│   ├── preferences.py    # Microphone choice and "setup done" (no secrets)
+│   ├── settings.py       # The Settings page's voice buttons
+│   ├── setup_guide.py    # The first-run setup guide's buttons
 │   ├── registry.py       # Explicit approved-tool registry
 │   ├── tools/            # Notes, apps, PC controls, windows, files and timers
 │   └── voice/            # Wake word, microphone, speech input, and speech output
 ├── frontend/             # Everything you see (imports nothing from backend)
 │   ├── confirm.py        # Keypress confirmation and private-reply popups
+│   ├── keybox.py         # The masked window where you paste an API key
 │   ├── tray.py           # Tray icon by the clock
 │   ├── window.py         # The on-demand screen's window process
 │   └── screen/           # The screen itself: HTML, CSS and JavaScript

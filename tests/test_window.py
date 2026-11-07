@@ -79,18 +79,55 @@ def test_the_page_can_only_press_the_listed_buttons():
     out = io.StringIO()
     api = window._Api(out, threading.Lock())
     public = [n for n in dir(api) if not n.startswith("_")]
-    assert set(public) == set(window.COMMANDS)
-    for name in public:
+    assert set(public) == set(window.COMMANDS) | set(window.CHOICES)
+    for name in window.COMMANDS:
         assert list(inspect.signature(getattr(api, name)).parameters) == []      # no data can be sent
         out.seek(0), out.truncate()
         getattr(api, name)()
         assert json.loads(out.getvalue()) == {"cmd": name}
 
 
+def test_the_one_choice_sends_only_a_small_whole_number():
+    out = io.StringIO()
+    api = window._Api(out, threading.Lock())
+    api.setup_mic(3)
+    assert json.loads(out.getvalue()) == {"cmd": "setup_mic", "arg": 3}
+    for bad in (-1, 17, 2.0, True, "1", None, [1], {"a": 1}, 10**9):
+        out.seek(0), out.truncate()
+        api.setup_mic(bad)
+        assert out.getvalue() == "", bad
+
+
 def test_screen_buttons_match_the_backend_list():
     from backend.settings import COMMANDS as SETTINGS
+    from backend.setup_guide import CHOICES, COMMANDS as SETUP
 
-    assert window.COMMANDS == {"toggle_pause", *SETTINGS}
+    assert window.COMMANDS == {"toggle_pause", *SETTINGS, *SETUP}
+    assert window.CHOICES == CHOICES
+    js = (window.PAGE.parent / "screen.js").read_text(encoding="utf-8")
+    for name in window.COMMANDS - {"toggle_pause"}:
+        assert f'"{name}"' in js                    # the page's own list of buttons knows it
+
+
+def test_the_app_side_drops_bad_choices():
+    got, chosen = [], []
+
+    class Proc:
+        stdout = [json.dumps({"cmd": "setup_mic", "arg": 2}) + "\n",
+                  json.dumps({"cmd": "setup_mic", "arg": 99}) + "\n",
+                  json.dumps({"cmd": "setup_mic", "arg": "2"}) + "\n",
+                  json.dumps({"cmd": "toggle_pause", "arg": 1}) + "\n",      # a bare button with data: dropped
+                  json.dumps({"cmd": "teach_start", "arg": 1}) + "\n",
+                  json.dumps({"cmd": "setup_status"}) + "\n"]
+
+    link = window.ScreenLink(on_command=got.append, on_choice=lambda n, v: chosen.append((n, v)))
+    link._read(Proc())
+    assert chosen == [("setup_mic", 2)] and got == ["setup_status"]
+
+
+def test_setup_updates_reach_the_page():
+    js = to_js({"call": "setup", "args": [{"keys": {"gemini": True}, "mics": ["Windows default"], "mic": 0}]})
+    assert js.startswith("window.HUD && window.HUD.setup(...[")
 
 
 def test_teaching_updates_go_through_as_data():
