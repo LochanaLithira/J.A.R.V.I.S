@@ -8,7 +8,7 @@ Please **do not open a public issue** for a security problem.
 
 - Use GitHub's private vulnerability reporting: open the repository's **Security** tab and choose **Report a vulnerability**.
 - Include the steps to reproduce it, what you expected, and what happened. Never include real API keys or private data.
-- The `dev` branch is the supported version; fixes land there first.
+- The `main` branch is the supported release. Fixes land on `dev` first and reach `main` in the next release.
 
 ## The core idea
 
