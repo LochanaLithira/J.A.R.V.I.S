@@ -10,10 +10,10 @@ A security-focused, voice-enabled personal assistant for Windows. J.A.R.V.I.S. t
 2. Get the project, either:
    - with git:
      ```powershell
-     git clone -b dev https://github.com/LochanaLithira/J.A.R.V.I.S.git
+     git clone https://github.com/LochanaLithira/J.A.R.V.I.S.git
      cd J.A.R.V.I.S
      ```
-   - or without git: on GitHub, switch to the `dev` branch, choose **Code > Download ZIP**, and unzip it.
+   - or without git: on the project's GitHub page, choose **Code > Download ZIP** and unzip it.
 3. Double-click **`start.bat`** in the project folder. The first time, it runs `setup.ps1`, which creates the project's own Python environment (`.venv`) and installs the exact packages in `requirements.txt`, each one checked against its fingerprint. This takes a few minutes. Then J.A.R.V.I.S. starts and its screen opens on the [setup guide](#set-up-on-the-screen-easiest) for your keys, models, microphone and voice.
 
 After that, `start.bat` simply starts J.A.R.V.I.S. (or turn on "Start with Windows" in the guide). To update, run `git pull` (or download the ZIP again), then run `setup.ps1` once more to bring the packages up to date:
@@ -56,13 +56,14 @@ Neither script needs administrator rights or changes any system setting. Everyth
 
 ## Installation
 
-The [Quick start](#quick-start) does all of this for you. To do it by hand, clone the repository and switch to the development branch:
+The [Quick start](#quick-start) does all of this for you. To do it by hand, clone the repository:
 
 ```powershell
 git clone https://github.com/LochanaLithira/J.A.R.V.I.S.git
 cd J.A.R.V.I.S
-git checkout dev
 ```
+
+`main` is the released version. Work in progress lives on `dev` (`git checkout dev`).
 
 Create and activate a virtual environment:
 
