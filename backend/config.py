@@ -59,7 +59,11 @@ MODELS_DIR = _base / "jarvis" / "models"
 
 # Part of the microphone's name, or None for the Windows default input. The Windows default on
 # this laptop is a virtual mic (AudioRelay), so the built-in microphone is named here.
+# A microphone picked in the setup guide on the screen takes the place of this one.
 MIC_DEVICE = "Microphone Array"
+
+# Choices made on the screen that are not secrets (the microphone, whether setup is done).
+PREFERENCES = _base / "jarvis" / "preferences.json"
 
 # Tuned on your own voice (26 tries): 0.25 with patience 1 caught 25 of 26, and a minute of
 # normal talk never scored above 0.006. Raise the threshold if it wakes by mistake.

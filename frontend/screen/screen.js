@@ -9,6 +9,7 @@
  *   HUD.setSystems([{name, ok}])
  *   HUD.setVoice({taught, created, samples, bar, on, strict, problem, message})   the Settings page's Voice section
  *   HUD.teach({phase, mode, done, of, tip, message, outcome, can_redo, ...})       progress while teaching your voice
+ *   HUD.setup({keys, key_notes, models, mics, mic, voice, autostart, listening, busy, notes, open})   the setup guide
  * With no app attached (opened as a plain file), a demo plays so the look can be judged.
  */
 (() => {
@@ -411,7 +412,12 @@
     }
   }
 
-  function setLevel(x) { levelTarget = clamp(Number(x) || 0); lastLevelAt = performance.now(); }
+  function setLevel(x) {
+    levelTarget = clamp(Number(x) || 0);
+    lastLevelAt = performance.now();
+    const meter = $("guide-level");
+    if (meter) meter.style.width = `${Math.round(levelTarget * 100)}%`;
+  }
 
   function tickClock() {
     const now = new Date();
@@ -433,13 +439,23 @@
 
   // ---- settings: your voice ----------------------------------------------------------------------
   // The page only presses buttons (bare names, no data). The app answers with setVoice and teach.
-  const BUTTONS = ["teach_start", "teach_record", "teach_redo", "teach_cancel", "voice_test", "voice_forget", "voice_status"];
+  const BUTTONS = ["teach_start", "teach_record", "teach_redo", "teach_cancel", "voice_test", "voice_forget", "voice_status",
+    "setup_status", "setup_key_gemini", "setup_key_groq", "setup_key_fish", "setup_get_gemini", "setup_get_groq",
+    "setup_get_fish", "setup_test_keys", "setup_models", "setup_mic_test", "setup_autostart_on", "setup_autostart_off",
+    "setup_finish"];
+  const MAX_MICS = 17;                     // the one choice: a microphone's place in the list the app sent
   let demoPress = null;                    // stands in for the app in demo mode
   function press(name) {
     if (!BUTTONS.includes(name)) return;
     const api = attached && window.pywebview && window.pywebview.api;
     if (api && typeof api[name] === "function") api[name]();
     else if (!attached && demoPress) demoPress(name);
+  }
+  function choose(name, index) {
+    if (name !== "setup_mic" || !Number.isInteger(index) || index < 0 || index >= MAX_MICS) return;
+    const api = attached && window.pywebview && window.pywebview.api;
+    if (api && typeof api.setup_mic === "function") api.setup_mic(index);
+    else if (!attached && demoPress) demoPress(name, index);
   }
 
   let teaching = false, voiceTaught = false;
@@ -536,7 +552,159 @@
     $("voice-section").classList.remove("muted");
     teaching = false;
     press("voice_status");
+    if (backToGuide) {                       // taught from the guide: carry on with the next step
+      backToGuide = false;
+      $("settings").hidden = true;
+      openGuide(STEPS.indexOf("voice"));
+    }
   }
+
+  // ---- the setup guide -----------------------------------------------------------------------
+  // Shows what the app sends with HUD.setup and presses its buttons. It never handles a key.
+  const STEPS = ["welcome", "keys", "models", "mic", "voice", "autostart", "done"];
+  const STEP_NAMES = ["Welcome", "Keys", "Models", "Microphone", "Your voice", "Start with Windows", "Ready"];
+  const KEY_NOTES = { works: "works", refused: "was refused", unreachable: "couldn't be checked (no connection?)" };
+  const BUSY_WORDS = { key: "Waiting for the key window...", test: "Testing your keys...", models: "Downloading...",
+    mic: "Listening to the microphone...", autostart: "Changing autostart...", finish: "Starting..." };
+  let step = 0, guide = {}, backToGuide = false;
+
+  function stepDone(name) {
+    const g = guide;
+    if (name === "keys") return !!(g.keys && g.keys.gemini && g.keys.groq && g.keys.fish);
+    if (name === "models") return !!g.models;
+    if (name === "mic") return Number.isInteger(g.mic) && g.mic >= 0;
+    if (name === "voice") return !!g.voice;
+    if (name === "autostart") return g.autostart === "on";
+    if (name === "done") return !!g.listening;
+    return false;
+  }
+
+  function openGuide(at) {
+    $("guide").hidden = false;
+    if (Number.isInteger(at)) step = clamp(at, 0, STEPS.length - 1);
+    renderGuide();
+    press("setup_status");
+    $("guide-next").focus();
+  }
+  function closeGuide() { $("guide").hidden = true; }
+
+  function note(stepName) {
+    const n = (guide.notes || {})[stepName];
+    const el = document.querySelector(`[data-note="${stepName}"]`);
+    if (!el) return;
+    el.textContent = n && n.text ? String(n.text) : "";
+    el.className = "guide-note " + (n && ["ok", "warn", "bad"].includes(n.kind) ? n.kind : "");
+  }
+
+  function status(id, text, kind) {
+    const el = $(id);
+    el.textContent = text;
+    el.className = "setting-status " + kind;
+  }
+
+  function renderGuide() {
+    const g = guide, busy = String(g.busy || "");
+    // the rail of steps
+    const rail = $("guide-rail");
+    rail.replaceChildren();
+    STEPS.forEach((name, i) => {
+      const li = document.createElement("li");
+      const b = document.createElement("button");
+      b.type = "button";
+      b.textContent = STEP_NAMES[i];
+      b.className = (i === step ? "current " : "") + (stepDone(name) ? "done" : "");
+      b.addEventListener("click", () => { step = i; renderGuide(); });
+      li.append(b);
+      rail.append(li);
+    });
+    document.querySelectorAll(".guide-step").forEach((el) => { el.hidden = el.dataset.step !== STEPS[step]; });
+
+    // keys: set or not, never the key itself
+    document.querySelectorAll(".guide-key").forEach((row) => {
+      const id = row.dataset.key, set = !!(g.keys && g.keys[id]);
+      const tested = (g.key_notes || {})[id];
+      const el = row.querySelector("[data-state]");
+      el.textContent = set ? (tested ? `Saved, and ${KEY_NOTES[tested] || "didn't work"}` : "Saved") : "Not added yet";
+      el.className = "guide-key-state " + (set ? (tested && tested !== "works" ? "warn" : "ok") : "warn");
+      row.querySelector("[data-add]").textContent = set ? "Replace" : "Add key";
+    });
+    // models
+    status("guide-models-state", g.models ? "Downloaded and checked." : "Not downloaded yet.", g.models ? "ok" : "warn");
+    $("guide-models").textContent = g.models ? "Check again" : "Download";
+    // microphones: one button each, chosen by its place in the list
+    const mics = $("guide-mics");
+    mics.replaceChildren();
+    (Array.isArray(g.mics) ? g.mics : []).slice(0, MAX_MICS).forEach((name, i) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "guide-mic" + (g.mic === i ? " chosen" : "");
+      b.setAttribute("role", "radio");
+      b.setAttribute("aria-checked", g.mic === i ? "true" : "false");
+      b.textContent = String(name);
+      b.disabled = !!busy;
+      b.addEventListener("click", () => choose("setup_mic", i));
+      mics.append(b);
+    });
+    ["keys", "models", "mic", "autostart", "done"].forEach(note);
+    if (g.mic === -1 && !(g.notes || {}).mic) {
+      const el = document.querySelector('[data-note="mic"]');
+      el.textContent = "The microphone named in config.py wasn't found. Pick one above.";
+      el.className = "guide-note warn";
+    }
+    // voice
+    status("guide-voice-state", g.voice ? "Taught. Only your voice wakes J.A.R.V.I.S." :
+      "Not taught yet: any voice can wake J.A.R.V.I.S.", g.voice ? "ok" : "warn");
+    $("guide-teach").textContent = g.voice ? "Teach again" : "Teach my voice";
+    $("guide-teach").disabled = !g.models || !!busy;
+    // autostart
+    status("guide-autostart-state", g.autostart === "on" ? "On: J.A.R.V.I.S starts when you sign in." :
+      g.autostart === "off" ? "Off." : "Unknown.", g.autostart === "on" ? "ok" : "warn");
+    // the summary
+    const sum = $("guide-summary");
+    sum.replaceChildren();
+    STEPS.slice(1, -1).forEach((name) => {
+      const li = document.createElement("li");
+      li.textContent = STEP_NAMES[STEPS.indexOf(name)];
+      li.className = stepDone(name) ? "ok" : "warn";
+      sum.append(li);
+    });
+    $("guide-finish").textContent = g.listening ? "Finish" : "Start listening";
+    // buttons wait while something is running (the sign-up links never need to)
+    document.querySelectorAll("#guide [data-press]").forEach((b) => {
+      b.disabled = !!busy && !b.dataset.press.startsWith("setup_get_");
+    });
+    $("guide-busy").textContent = BUSY_WORDS[busy] || "";
+    $("guide-back").disabled = step === 0;
+    $("guide-next").textContent = step === STEPS.length - 1 ? "Close"
+      : stepDone(STEPS[step]) || step === 0 ? "Next" : "Skip for now";
+  }
+
+  function setup(state) {
+    guide = state && typeof state === "object" ? state : {};
+    if (guide.open) {
+      $("settings").hidden = true;
+      $("guide").hidden = false;
+      step = 0;
+    }
+    renderGuide();
+  }
+
+  $("guide-open").addEventListener("click", () => { $("settings").hidden = true; openGuide(0); });
+  $("guide-close").addEventListener("click", closeGuide);
+  $("guide").addEventListener("keydown", (e) => { if (e.key === "Escape") closeGuide(); });
+  $("guide-back").addEventListener("click", () => { step = Math.max(0, step - 1); renderGuide(); });
+  $("guide-next").addEventListener("click", () => {
+    if (step === STEPS.length - 1) { closeGuide(); return; }
+    step++;
+    renderGuide();
+  });
+  document.querySelectorAll("#guide [data-press]").forEach((b) => b.addEventListener("click", () => press(b.dataset.press)));
+  $("guide-teach").addEventListener("click", () => {
+    backToGuide = true;
+    closeGuide();
+    $("settings").hidden = false;
+    press("teach_start");
+  });
 
   $("settings-btn").addEventListener("click", openSettings);
   $("settings-close").addEventListener("click", closeSettings);
@@ -564,7 +732,7 @@
     });
   }
 
-  window.HUD = { setState, setLevel, addMessage, setTimers, addActivity, setSystems, teach, setVoice, attach,
+  window.HUD = { setState, setLevel, addMessage, setTimers, addActivity, setSystems, teach, setVoice, setup, attach,
     onPause: (fn) => pauseHandlers.push(fn) };
 
   window.addEventListener("resize", resize);
@@ -640,7 +808,7 @@
     const tips = ["normally", "a little quieter", "a little louder", "a bit faster", "from a bit further away"];
     const waitAt = (message, outcome) => teach({ phase: "waiting", mode: "teach", done: demoDone, of: 20,
       tip: tips[Math.floor(demoDone / 4) % tips.length], message, outcome, can_redo: demoDone > 0 });
-    demoPress = (name) => {
+    demoPress = (name, arg) => {
       if (name === "voice_status") {
         setVoice(demoTaught ? { taught: true, created: "2026-11-05 16:40", samples: 20, bar: 0.42, on: true } : { taught: false });
       } else if (name === "teach_start") {
@@ -670,7 +838,49 @@
       } else if (name === "voice_forget") {
         demoTaught = false;
         setVoice({ taught: false, message: "Your voiceprint was deleted." });
+      } else if (name.startsWith("setup_")) {
+        demoSetup(name, arg);
       }
+    };
+    // The setup guide in demo mode: pretend answers (no key box, nothing downloaded or listened to).
+    const fake = { keys: { gemini: true, groq: false, fish: false }, key_notes: {}, models: false,
+      mics: ["Windows default", "Microphone Array (Realtek(R) Au", "Headset Microphone (USB Audio)"], mic: 1,
+      voice: false, autostart: "off", listening: false, busy: "", notes: {} };
+    const demoSetup = (name, arg) => {
+      const show = () => { fake.voice = demoTaught; setup({ ...fake }); };
+      const busyFor = (what, ms, then) => {
+        fake.busy = what;
+        show();
+        setTimeout(() => { fake.busy = ""; then(); show(); }, ms);
+      };
+      if (name === "setup_status") show();
+      else if (name.startsWith("setup_key_")) busyFor("key", 900, () => {
+        fake.keys[name.slice(10)] = true;
+        fake.notes.keys = { text: "Saved in the Windows Credential Manager.", kind: "ok" };
+      });
+      else if (name === "setup_test_keys") busyFor("test", 1200, () => {
+        Object.keys(fake.keys).forEach((k) => { if (fake.keys[k]) fake.key_notes[k] = "works"; });
+        fake.notes.keys = { text: "Every key you added works.", kind: "ok" };
+      });
+      else if (name === "setup_models") busyFor("models", 1500, () => {
+        fake.models = true;
+        fake.notes.models = { text: "Downloaded, and every file matched its fingerprint.", kind: "ok" };
+      });
+      else if (name === "setup_mic") {
+        fake.mic = arg;
+        fake.notes.mic = { text: "Saved. Now try it: press Test and say something.", kind: "ok" };
+        show();
+      } else if (name === "setup_mic_test") {
+        speech(2200, 0.8);
+        busyFor("mic", 2400, () => { setLevel(0); fake.notes.mic = { text: "I heard you clearly.", kind: "ok" }; });
+      } else if (name === "setup_autostart_on" || name === "setup_autostart_off") busyFor("autostart", 600, () => {
+        fake.autostart = name.endsWith("_on") ? "on" : "off";
+        fake.notes.autostart = { text: `Autostart is now ${fake.autostart.toUpperCase()}.`, kind: "ok" };
+      });
+      else if (name === "setup_finish") busyFor("finish", 800, () => {
+        fake.listening = true;
+        fake.notes.done = { text: 'All set. Say "hey jarvis".', kind: "ok" };
+      });
     };
     addMessage("system", "Demo mode: this is how the screen will look with J.A.R.V.I.S attached.");
     play();
