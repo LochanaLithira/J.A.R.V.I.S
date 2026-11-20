@@ -35,11 +35,11 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 # The only screen calls J.A.R.V.I.S may make, with how many arguments each takes.
 ALLOWED_CALLS = {"setState": 2, "setLevel": 1, "addMessage": 3, "setTimers": 1, "addActivity": 1, "setSystems": 1,
-                 "teach": 1, "setVoice": 1, "setup": 1}
+                 "teach": 1, "setVoice": 1, "setup": 1, "wakeTest": 1}
 MAX_LINE_CHARS = 200_000
 # Every button the page has. Kept in step with backend/settings.py (this side never imports it).
 COMMANDS = frozenset({"toggle_pause", "teach_start", "teach_record", "teach_redo", "teach_cancel", "voice_test",
-                      "voice_forget", "voice_status",
+                      "voice_forget", "voice_status", "wake_test_start", "wake_test_stop",
                       # the setup guide (backend/setup_guide.py)
                       "setup_status", "setup_key_gemini", "setup_key_groq", "setup_key_fish", "setup_get_gemini",
                       "setup_get_groq", "setup_get_fish", "setup_test_keys", "setup_models", "setup_mic_test",
@@ -108,6 +108,12 @@ class _Api:
 
     def voice_status(self) -> None:
         self._press("voice_status")
+
+    def wake_test_start(self) -> None:
+        self._press("wake_test_start")
+
+    def wake_test_stop(self) -> None:
+        self._press("wake_test_stop")
 
     # ---- the setup guide ----
     def setup_status(self) -> None:
@@ -386,6 +392,10 @@ class ScreenLink:
     def teach(self, update: dict) -> None:
         """Progress while teaching your voice (numbers and short messages only)."""
         self._call("teach", update)
+
+    def wake_test(self, update: dict) -> None:
+        """The wake-up self-test: each try's numbers (scores only, never sound)."""
+        self._call("wakeTest", update)
 
     def setup(self, state: dict) -> None:
         """What the setup guide shows: which keys are set (never the keys), models, microphones."""

@@ -10,6 +10,8 @@
  *   HUD.setVoice({taught, created, samples, bar, on, strict, problem, message})   the Settings page's Voice section
  *   HUD.teach({phase, mode, done, of, tip, message, outcome, can_redo, ...})       progress while teaching your voice
  *   HUD.setup({keys, key_notes, models, mics, mic, voice, autostart, listening, busy, notes, open})   the setup guide
+ *   HUD.wakeTest({phase, tries: [{n, wake, wake_needed, weak_needed, speech, speech_needed, voice, voice_needed, verdict}],
+ *                 of, passed, stops, message})   the wake-up self-test (numbers only)
  * With no app attached (opened as a plain file), a demo plays so the look can be judged.
  */
 (() => {
@@ -440,6 +442,7 @@
   // ---- settings: your voice ----------------------------------------------------------------------
   // The page only presses buttons (bare names, no data). The app answers with setVoice and teach.
   const BUTTONS = ["teach_start", "teach_record", "teach_redo", "teach_cancel", "voice_test", "voice_forget", "voice_status",
+    "wake_test_start", "wake_test_stop",
     "setup_status", "setup_key_gemini", "setup_key_groq", "setup_key_fish", "setup_get_gemini", "setup_get_groq",
     "setup_get_fish", "setup_test_keys", "setup_models", "setup_mic_test", "setup_autostart_on", "setup_autostart_off",
     "setup_finish"];
@@ -558,6 +561,58 @@
       openGuide(STEPS.indexOf("voice"));
     }
   }
+
+  // ---- the wake-up self-test ------------------------------------------------------------------
+  // Each try shows three numbers and what stopped it. The app sends numbers only, never sound.
+  const STOP_WORDS = {
+    "hey jarvis score too low": "the \"hey jarvis\" detector wasn't sure enough",
+    "no voice heard": "too little voice was heard",
+    "not your voice": "it didn't sound enough like you",
+  };
+  const num = (x) => (x === null || x === undefined ? "-" : Number(x).toFixed(2));
+
+  function wakeTest(u) {
+    u = u || {};
+    const box = $("wake-test-box");
+    box.hidden = false;
+    $("settings").hidden = false;
+    const phase = String(u.phase || "");
+    const of = Number(u.of) || 10;
+    $("wake-test-head").textContent = phase === "failed" ? String(u.message || "The test couldn't start.")
+      : phase === "done" ? "Test finished." : `Say "hey jarvis" ${of} times, the way you normally do, with a short pause between.`;
+    const list = $("wake-test-tries");
+    list.replaceChildren();
+    for (const t of Array.isArray(u.tries) ? u.tries : []) {
+      const li = document.createElement("li");
+      const ok = String(t.verdict || "").startsWith("passed");
+      li.className = ok ? "ok" : "warn";
+      const wakeNeed = t.weak_needed !== null && t.weak_needed !== undefined ? `${num(t.weak_needed)}/${num(t.wake_needed)}` : num(t.wake_needed);
+      li.textContent = `${Number(t.n) || ""}. hey jarvis ${num(t.wake)} (needs ${wakeNeed}) · voice heard ${num(t.speech)} s` +
+        ` (needs ${num(t.speech_needed)}) · sounds like you ${num(t.voice)} (needs ${num(t.voice_needed)}) → ` +
+        (ok ? (t.verdict === "passed (weak)" ? "would wake (weak try)" : "would wake") : `stopped: ${STOP_WORDS[t.verdict] || t.verdict}`);
+      list.append(li);
+    }
+    const summary = $("wake-test-summary");
+    if (phase === "done") {
+      const tries = Number(u.count ?? (Array.isArray(u.tries) ? u.tries.length : 0));
+      const stops = u.stops && typeof u.stops === "object" ? Object.entries(u.stops) : [];
+      stops.sort((a, b) => b[1] - a[1]);
+      summary.textContent = `${Number(u.passed) || 0} of ${tries} tries would have woken J.A.R.V.I.S.` +
+        (stops.length ? ` Most often stopped because ${STOP_WORDS[stops[0][0]] || stops[0][0]}.` : "");
+      summary.className = "setting-status " + ((Number(u.passed) || 0) >= Math.max(1, tries - 1) ? "ok" : "warn");
+    } else {
+      summary.textContent = "";
+      summary.className = "setting-status";
+    }
+    const running = phase === "running";
+    $("wake-test-stop").hidden = !running;
+    $("wake-test-close").hidden = running;
+    $("wake-test").disabled = running;
+  }
+
+  $("wake-test").addEventListener("click", () => press("wake_test_start"));
+  $("wake-test-stop").addEventListener("click", () => press("wake_test_stop"));
+  $("wake-test-close").addEventListener("click", () => { $("wake-test-box").hidden = true; });
 
   // ---- the setup guide -----------------------------------------------------------------------
   // Shows what the app sends with HUD.setup and presses its buttons. It never handles a key.
@@ -732,7 +787,7 @@
     });
   }
 
-  window.HUD = { setState, setLevel, addMessage, setTimers, addActivity, setSystems, teach, setVoice, setup, attach,
+  window.HUD = { setState, setLevel, addMessage, setTimers, addActivity, setSystems, teach, setVoice, setup, wakeTest, attach,
     onPause: (fn) => pauseHandlers.push(fn) };
 
   window.addEventListener("resize", resize);
@@ -840,6 +895,18 @@
         setVoice({ taught: false, message: "Your voiceprint was deleted." });
       } else if (name.startsWith("setup_")) {
         demoSetup(name, arg);
+      } else if (name === "wake_test_start") {
+        const fakeTries = [];
+        const samples = [[0.31, 0.5, 0.61, "passed"], [0.19, 0.42, 0.58, "passed (weak)"], [0.11, 0.38, 0.55, "hey jarvis score too low"],
+          [0.27, 0.45, 0.66, "passed"], [0.22, 0.48, 0.47, "not your voice"]];
+        wakeTest({ phase: "running", tries: [], of: 5 });
+        samples.forEach((sm, i) => setTimeout(() => {
+          fakeTries.push({ n: i + 1, wake: sm[0], wake_needed: 0.25, weak_needed: 0.15, speech: sm[1], speech_needed: 0.25,
+            voice: sm[2], voice_needed: sm[0] > 0.25 ? 0.45 : 0.5, verdict: sm[3] });
+          const last = i === samples.length - 1;
+          wakeTest({ phase: last ? "done" : "running", tries: fakeTries.slice(), of: 5, passed: 3, count: fakeTries.length,
+            stops: last ? { "hey jarvis score too low": 1, "not your voice": 1 } : undefined });
+        }, 900 * (i + 1)));
       }
     };
     // The setup guide in demo mode: pretend answers (no key box, nothing downloaded or listened to).

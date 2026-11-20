@@ -19,7 +19,7 @@ from typing import Any, Callable
 
 import numpy as np
 
-from .. import config
+from .. import config, preferences
 from .other_voices import other_voices
 from .voiceprint import (CHECK_SECONDS, Calibration, SpeakerModel, VoiceprintError, calibrate,
                          delete_voiceprint, download_speaker_model, load_cohort, load_voiceprint,
@@ -188,7 +188,7 @@ def screen_prepare(on_level: Callable[[Any], None] | None = None,
                             config.WAKE_SPEECH_CONFIDENCE)
         triggers = Triggers(WakeWordDetector(config.MODELS_DIR), None, config.WAKE_THRESHOLD,
                             config.WAKE_PATIENCE, cooldown_seconds=0.5, voice_check=voiced)
-        device = pick_microphone(config.MIC_DEVICE)
+        device = pick_microphone(preferences.microphone())   # the same microphone as listening
 
         def listen(stop, on_ready: Callable[[], None]) -> list | None:
             def chime() -> None:
@@ -215,7 +215,7 @@ def _open_listening():
     voiced = VoiceCheck(SileroVAD(config.MODELS_DIR), config.WAKE_MIN_SPEECH_SECONDS, config.WAKE_SPEECH_CONFIDENCE)
     triggers = Triggers(WakeWordDetector(config.MODELS_DIR), None, config.WAKE_THRESHOLD, config.WAKE_PATIENCE,
                         cooldown_seconds=0.5, voice_check=voiced)
-    return probe, Microphone(pick_microphone(config.MIC_DEVICE)), triggers
+    return probe, Microphone(pick_microphone(preferences.microphone())), triggers
 
 
 def _secrets():

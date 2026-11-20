@@ -135,6 +135,7 @@ _NOTHING_HEARD = {
     "too short": "That was too short to understand.",
     "noise": "That sounded like background noise, so I ignored it.",
     "stopped": "Stopped.",
+    "no wake word": "Ignored: \"Jarvis\" wasn't in what I heard.",
 }
 
 
@@ -170,6 +171,37 @@ def strip_wake_words(text: str) -> str:
         return original.strip()                # nothing removed: leave it exactly as heard
     text = text.strip()
     return text[:1].upper() + text[1:] if text else ""
+
+
+WAKE_WORD_WITHIN = 6                    # "Jarvis" must be among the first few words heard
+
+
+def _wake_like(word: str) -> bool:
+    """"Jarvis", or something Whisper often writes instead (Jervis, Travis, Javis...)."""
+    import difflib
+
+    w = "".join(ch for ch in word.lower() if ch.isalpha())
+    if len(w) < 4:
+        return False
+    if _WAKE_WORDS_RE.match(w):
+        return True
+    return difflib.SequenceMatcher(None, w, "jarvis").ratio() >= 0.72
+
+
+def after_wake_word(text: str) -> str | None:
+    """The words after "(hey) Jarvis" if it is among the first few words, else None.
+
+    "So, hey Jarvis, open notepad." -> "Open notepad."  /  "The visual chart splits..." -> None.
+    Used when the wake word and the command came in one breath: the sound from just before the
+    wake-up is sent along, so the words must really contain "Jarvis"."""
+    if not isinstance(text, str):
+        return None
+    words = text.split()
+    for i, word in enumerate(words[:WAKE_WORD_WITHIN]):
+        if _wake_like(word):
+            rest = " ".join(words[i + 1:]).lstrip(" ,.!?-")
+            return rest[:1].upper() + rest[1:] if rest else ""
+    return None
 
 
 def is_stop_phrase(text: str) -> bool:
@@ -306,6 +338,29 @@ class Assistant:
         """You are teaching J.A.R.V.I.S your voice (True): it lets go of the microphone so it
         doesn't answer each "hey jarvis", and takes it back when you finish (False)."""
         self._change("_teaching", teaching)
+
+    def start_wake_test(self, on_update: Callable[[dict], None], tries: int = 10, seconds: float = 90.0) -> str:
+        """Measure your "hey jarvis" (Settings > Test wake-up): each try's scores go to `on_update`,
+        numbers only, and nothing wakes until the test ends. Returns a problem to show, or ""."""
+        if not hasattr(self._triggers, "start_test"):
+            return "The wake-up test isn't available."
+        if not self.listening_allowed() or self.status is Status.PROBLEM:
+            return "J.A.R.V.I.S isn't listening right now (paused, locked or no microphone)."
+        results: list = []
+
+        def on_try(result: dict) -> None:
+            results.append(result)
+            on_update({"phase": "running", "tries": list(results), "of": tries})
+
+        def on_done(summary: dict) -> None:
+            on_update({"phase": "done", "tries": list(results), "of": tries, **summary})
+
+        self._triggers.start_test(on_try, on_done, tries=tries, seconds=seconds)
+        return ""
+
+    def stop_wake_test(self) -> None:
+        if hasattr(self._triggers, "stop_test"):
+            self._triggers.stop_test()
 
     @property
     def voice_check(self) -> Any:
@@ -496,36 +551,56 @@ class Assistant:
                 pass
         return sum(1 for c in chunks if sound_level(c) > 0.3) >= 2
 
-    def _acknowledge(self, mic: Any) -> list:
+    def _acknowledge(self, mic: Any) -> tuple[list, bool]:
         """Let you know it heard you, without talking over you.
 
         It first listens for a moment. If you carried straight on ("hey jarvis, open notepad"),
-        it stays quiet and returns what you said so far, which becomes the start of the command.
-        If you paused, it says "Yes, sir?" (or plays the chime) and returns nothing. What the
-        microphone hears while J.A.R.V.I.S speaks is dropped, so it never records itself."""
+        it stays quiet and returns what you said so far, which becomes the start of the command,
+        and True: the words heard must then really contain "Jarvis" (talking that merely sounded
+        like it is ignored). If you paused, it says "Yes, sir?" (or plays the chime) and returns
+        nothing. What the microphone hears while J.A.R.V.I.S speaks is dropped."""
         if not (self._wake_reply and self._voice is not None and self._style is not None):
             self._chime()
-            return []
+            return [], False
         pause: list = []
         for chunk in mic.chunks(self._interrupt, idle_timeout=self._mic_idle):
             pause.append(chunk)
             if len(pause) * CHUNK / SAMPLE_RATE >= self._reply_delay:
                 break
         if not self.listening_allowed():
-            return []
+            return [], False
         if self._still_talking(pause):
             # One breath ("hey jarvis, open the downloads"): no reply. Include the moment before the
-            # wake word was confirmed, or the first words of the command would be lost.
+            # wake word was confirmed, or the first words of the command would be lost; that moment
+            # also holds "hey jarvis" itself, which is checked in the words heard.
             before = self._triggers.recent(PRE_ROLL_SECONDS) if hasattr(self._triggers, "recent") else []
-            return list(before) + pause
+            return list(before) + pause, bool(before)
         line = self._style.acknowledge()
         self._emit("said", text=line)
         self._say_out(f"J.A.R.V.I.S: {line}")
         if self._speak_line(line):
             mic.drain()
-            return []
+            return [], False
         self._chime()
-        return []
+        return [], False
+
+    def _record(self, event: str, **fields: Any) -> None:
+        audit = getattr(self._triggers, "_audit", None)
+        if audit is not None:
+            try:
+                audit.record(event, **fields)
+            except Exception as exc:
+                log.error("audit failed: %s", type(exc).__name__)
+
+    def _confirm_wake_word(self, heard: Heard) -> Heard:
+        """One breath: keep the command only if "Jarvis" is really in the words heard."""
+        if heard.error or not heard.text:
+            return heard
+        rest = after_wake_word(heard.text)
+        if rest is None:
+            self._record("wake_unconfirmed", source="hey jarvis")   # never the words
+            return Heard(reason="no wake word")
+        return dataclasses.replace(heard, text=rest) if rest else Heard(reason="no speech")
 
     def _handle(self, event: WakeEvent, mic: Any) -> None:
         self._set_status(Status.WORKING)
@@ -537,19 +612,25 @@ class Assistant:
         detail = f" (score {event.score:.2f})" if event.score is not None else ""
         self._say_out(f"WAKE: {event.source}{detail}")
         self._emit("wake", source=event.source, score=event.score)
-        already_said = self._acknowledge(mic)
+        already_said, one_breath = self._acknowledge(mic)
         t0 = time.monotonic()
         if self._speech is None:
             heard = Heard(error="Speech input is not set up.")
         else:
             self._emit("hearing", follow_up=False)
             stream = itertools.chain(already_said, mic.chunks(self._interrupt, idle_timeout=self._mic_idle))
-            heard = self._without_wake_words(self._speech.hear(self._metered(stream)))
+            heard = self._speech.hear(self._metered(stream))
+            if one_breath and event.source == "hey jarvis":
+                heard = self._confirm_wake_word(heard)
+            else:
+                heard = self._without_wake_words(heard)
         heard_s = time.monotonic() - t0
         self._say_out(describe_heard(heard))
         self._emit_heard(heard)
         if heard.error:
             self._notice(heard.error)
+        elif heard.reason == "no wake word":
+            pass                                 # you were talking, not calling: back to listening
         elif not heard.text:
             self._close_chime()                  # nothing said after waking: it has stopped listening
         elif is_stop_phrase(heard.text):
@@ -748,7 +829,8 @@ def make_voice_settings(get_assistant: Callable[[], Any], screen: Any, confirm: 
                                voices, save, pause_listening, on_update, current=current)
 
     settings = VoiceSettings(get_assistant, screen.teach, screen.set_voice, confirm, get_secret, set_secret,
-                             delete_secret, make_session, model_factory=SpeakerModel, vad_factory=_speech_trimmer)
+                             delete_secret, make_session, model_factory=SpeakerModel, vad_factory=_speech_trimmer,
+                             show_wake_test=screen.wake_test)
 
     def watch() -> None:
         while True:
@@ -838,7 +920,10 @@ def build_assistant(audit: Any, get_flow: Callable[[], Flow] | None, voice: Voic
     checks = [(name, c) for name, c in (("no voice", voice_check), ("not your voice", speaker)) if c is not None]
     triggers = Triggers(wake, clap, config.WAKE_THRESHOLD, config.WAKE_PATIENCE,
                         config.WAKE_COOLDOWN_SECONDS, audit=audit,
-                        voice_check=AllChecks(checks) if checks else None)
+                        voice_check=AllChecks(checks) if checks else None,
+                        weak_threshold=config.WAKE_WEAK_THRESHOLD, weak_extra=config.WAKE_WEAK_EXTRA,
+                        second_chance_seconds=config.WAKE_SECOND_CHANCE_SECONDS,
+                        second_chance_threshold=config.WAKE_SECOND_CHANCE_THRESHOLD)
     return Assistant(triggers, make_speech(audit, on_recorded=play_done_chime), get_flow, voice,
                      pick_microphone(preferences.microphone()), show_text=show_text, on_status=on_status,
                      on_notice=on_notice, out=out, warm=warm_all,
@@ -877,7 +962,7 @@ _HUD_STATE = {Status.STARTING: "starting", Status.LISTENING: "listening", Status
 _STATUS_ACTIVITY = {Status.PAUSED: ("listening paused", "warn"), Status.LOCKED: ("Windows locked: microphone off", "warn"),
                     Status.ASLEEP: ("asleep: microphone off", "warn")}
 _NOTHING_ACTIVITY = {"no speech": "heard nothing", "too short": "too short to understand", "stopped": "stopped",
-                     "noise": "ignored background noise"}
+                     "noise": "ignored background noise", "no wake word": "ignored: no \"Jarvis\" in the words"}
 
 
 def screen_feed(screen: Any) -> tuple[Callable[[Status, str], None], Callable[[str, dict], None]]:

@@ -83,19 +83,25 @@ class VoiceCheck:
     """Was there really a human voice in this audio? Used when the wake word fires, so a fan, a
     door or a knock that happens to score like "hey jarvis" is ignored. Runs on this laptop."""
 
+    WINDOW_SECONDS = 1.6                 # speech is counted only in the last moment (the wake word)
+
     def __init__(self, vad: Callable[[np.ndarray], float], min_speech_seconds: float = 0.3,
                  speech_prob: float = 0.5):
         self._vad, self.min_speech, self.speech_prob = vad, min_speech_seconds, speech_prob
 
     def speech_seconds(self, chunks: Iterable[np.ndarray], prob: float | None = None) -> float:
+        """Seconds of speech in the last WINDOW_SECONDS. The voice detector remembers what came
+        before (it needs a little context), so it first runs over the earlier audio to warm up,
+        and only the frames in the window are counted."""
         chunks = list(chunks)
         audio = np.concatenate([np.asarray(c, dtype=np.int16) for c in chunks]) if chunks else np.zeros(0, np.int16)
         if hasattr(self._vad, "reset"):
             self._vad.reset()
         needed = self.speech_prob if prob is None else prob
+        counted_from = len(audio) - int(self.WINDOW_SECONDS * SAMPLE_RATE)
         frames = 0
         for i in range(0, len(audio) - VAD_FRAME + 1, VAD_FRAME):
-            if self._vad(audio[i:i + VAD_FRAME]) >= needed:
+            if self._vad(audio[i:i + VAD_FRAME]) >= needed and i >= counted_from:
                 frames += 1
         return frames * VAD_FRAME / SAMPLE_RATE
 

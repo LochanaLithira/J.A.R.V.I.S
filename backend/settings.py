@@ -9,6 +9,8 @@ what to show (progress and status, never audio or voice numbers).
 - voice_forget: delete your voiceprint. This weakens security, so it needs the same Y-keypress
   confirmation window as deleting a file
 - voice_status: what the Voice section should show
+- wake_test_start / wake_test_stop: say "hey jarvis" up to 10 times and see, for each try, the
+  wake-word score, how much voice was heard and your voice score (numbers only, nothing recorded)
 """
 from __future__ import annotations
 
@@ -23,7 +25,7 @@ from .voice.voiceprint import (AllChecks, SpeakerCheck, StrictCheck, Voiceprint,
 log = logging.getLogger("jarvis")
 
 COMMANDS = ("teach_start", "teach_record", "teach_redo", "teach_cancel", "voice_test", "voice_forget",
-            "voice_status")
+            "voice_status", "wake_test_start", "wake_test_stop")
 SPEAKER = "not your voice"                       # the name of your voice check among the wake checks
 
 
@@ -32,8 +34,10 @@ class VoiceSettings:
                  show_voice: Callable[[dict], None], confirm: Callable[[str, dict], bool],
                  get_secret: Callable, set_secret: Callable, delete_secret: Callable,
                  make_session: Callable[..., Any], model_factory: Callable[[Any], Any] | None = None,
-                 voices: Callable[[], list] | None = None, vad_factory: Callable[[], Any] | None = None):
+                 voices: Callable[[], list] | None = None, vad_factory: Callable[[], Any] | None = None,
+                 show_wake_test: Callable[[dict], None] | None = None):
         self._assistant, self._show_teach, self._show_voice = get_assistant, show_teach, show_voice
+        self._show_wake_test = show_wake_test or (lambda update: None)
         self._vad_factory = vad_factory
         self._confirm = confirm
         self._get, self._set, self._delete = get_secret, set_secret, delete_secret
@@ -92,6 +96,24 @@ class VoiceSettings:
 
     def _voice_status(self) -> None:
         self._show_voice(self.status())
+
+    def _wake_test_start(self) -> None:
+        if self._session is not None and self._session.active:
+            return                                # teaching uses the microphone
+        assistant = self._assistant()
+        if assistant is None or not hasattr(assistant, "start_wake_test"):
+            self._show_wake_test({"phase": "failed", "message": "J.A.R.V.I.S isn't listening (no microphone or models)."})
+            return
+        problem = assistant.start_wake_test(self._show_wake_test)
+        if problem:
+            self._show_wake_test({"phase": "failed", "message": problem})
+        else:
+            self._show_wake_test({"phase": "running", "tries": [], "of": 10})
+
+    def _wake_test_stop(self) -> None:
+        assistant = self._assistant()
+        if assistant is not None and hasattr(assistant, "stop_wake_test"):
+            assistant.stop_wake_test()
 
     def check_idle(self) -> None:
         if self._session is not None:

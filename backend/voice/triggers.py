@@ -278,6 +278,7 @@ class ClapDetector:
 class WakeEvent:
     source: str                        # "hey jarvis" or "double clap"
     score: float | None = None
+    weak: bool = False                 # a weak "hey jarvis" that passed the voice check with room to spare
 
 
 class Triggers:
@@ -290,18 +291,30 @@ class Triggers:
 
     MUTE_TAIL_SECONDS = 1.0            # stay deaf this long after speech ends (echo, room reverb)
     RECENT_CHUNKS = 30                 # about 2.4 seconds of audio, in memory only, for the voice check
-    REJECT_PAUSE_SECONDS = 1.0         # after a rejected wake-up, don't check again for a moment
+    REJECT_PAUSE_SECONDS = 0.3         # after a rejected wake-up, don't check again for a moment
+    TRY_FLOOR = 0.05                   # a "hey jarvis" score from here up is a try (near miss or wake-up)
+    TRY_END_CHUNKS = 3                 # this many lower slices in a row (~0.24 s) end a try
+    TRIES_NOTED_SECONDS = 15.0         # near misses this recent are noted with the next wake-up
 
     def __init__(self, wake: WakeWordDetector | None = None, clap: ClapDetector | None = None,
                  threshold: float = 0.25, patience: int = 1, cooldown_seconds: float = 1.5,
                  audit: Any = None, clock: Callable[[], float] = time.monotonic,
-                 voice_check: Callable[[list], bool] | None = None):
+                 voice_check: Callable[[list], bool] | None = None,
+                 weak_threshold: float | None = None, weak_extra: float = 0.05,
+                 second_chance_seconds: float = 0.0, second_chance_threshold: float | None = None):
         if not 0.0 < threshold < 1.0:
             raise ValueError("threshold must be between 0 and 1")
         if not isinstance(patience, int) or patience < 1:
             raise ValueError("patience must be a whole number of at least 1")
+        for name, value in (("weak_threshold", weak_threshold), ("second_chance_threshold", second_chance_threshold)):
+            if value is not None and not 0.0 < value < threshold:
+                raise ValueError(f"{name} must be between 0 and the threshold")
+        if not 0.0 <= weak_extra < 1.0:
+            raise ValueError("weak_extra must be between 0 and 1")
         self._wake, self._clap = wake, clap
         self._threshold, self._patience, self._cooldown = threshold, patience, cooldown_seconds
+        self._weak, self._weak_extra = weak_threshold, weak_extra
+        self._second_seconds, self._second_threshold = second_chance_seconds, second_chance_threshold
         self._audit, self._clock = audit, clock
         self._voice_check = voice_check
         self._recent: deque = deque(maxlen=self.RECENT_CHUNKS)
@@ -310,6 +323,10 @@ class Triggers:
         self._last_reject = -math.inf
         self._muted = False
         self._muted_until = -math.inf
+        self._clear_try()
+        self._tries: deque = deque(maxlen=10)       # recent near misses: (time, score, what stopped it)
+        self._second_until = -math.inf              # a second chance is open until then
+        self._test: dict | None = None              # the wake-up self-test, while it runs
         self.last_score = 0.0
         self.rejected = 0                  # wake-ups dropped because no voice was heard
 
@@ -321,6 +338,7 @@ class Triggers:
                 detector.reset()
         self._above = 0
         self._recent.clear()
+        self._clear_try()
 
     def recent(self, seconds: float = 1.6) -> list:
         """The last few seconds of sound (memory only). Used when you say the wake word and your
@@ -343,50 +361,193 @@ class Triggers:
         score = self._wake.feed(chunk) if self._wake is not None else 0.0
         clapped = self._clap.feed(chunk) if self._clap is not None else False
         self.last_score = score
-        self._above = self._above + 1 if score > self._threshold else 0
         self._recent.append(chunk)              # the last ~2 s, in memory only
 
         now = self._clock()
         if self._muted or now < self._muted_until:
             self._above = 0
+            self._clear_try()
             return None
+        ended = self._track_try(score)
+        if self._test is not None:              # the self-test only measures: nothing wakes
+            if ended is not None:
+                peak, _handled, at_peak, at_cross = ended
+                # judged on the sound a real wake-up would be judged on: when the score first crossed
+                # the line (a strong try), else at its highest score (a weak try)
+                self._test_try(peak, at_cross if (peak > self._threshold and at_cross) else at_peak)
+            if self._test is not None and (self._test["n"] >= self._test["tries"] or now > self._test["until"]):
+                self.stop_test()
+            return None
+        self._above = self._above + 1 if score > self._threshold else 0
         if self._above >= self._patience:
+            self._try_handled = True             # decided now; the end of this try needs no second look
             event = WakeEvent("hey jarvis", round(score, 3))
         elif clapped:
             event = WakeEvent("double clap")
+        elif ended is not None and not ended[1]:
+            event = self._weak_try(ended[0], now)
+            if event is None:
+                return None
+            # a weak try is decided once the score has fallen again, so it is judged on the sound kept
+            # from its highest moment (by then the last 2 s have moved past the start of "hey")
+            return self._decide(event, now, ended[2])
         else:
             return None
+        return self._decide(event, now)
+
+    # ---- tries: one rise and fall of the "hey jarvis" score -------------------------------
+    def _clear_try(self) -> None:
+        self._try_peak, self._try_quiet, self._try_handled = 0.0, 0, False
+        self._try_audio, self._cross_audio = [], None
+
+    def _track_try(self, score: float) -> tuple[float, bool, list, list | None] | None:
+        """Follow the score; when a try ends, return (its highest score, whether it was already
+        decided, the sound at its highest score, the sound when it first crossed the line). The
+        sound is the same last ~2 s already kept in memory, and it is dropped with the try."""
+        if score >= self.TRY_FLOOR:
+            if score > self._try_peak:
+                self._try_peak, self._try_audio = score, list(self._recent)
+            if score > self._threshold and self._cross_audio is None:
+                self._cross_audio = list(self._recent)
+            self._try_quiet = 0
+            return None
+        if self._try_peak <= 0.0:
+            return None
+        self._try_quiet += 1
+        if self._try_quiet < self.TRY_END_CHUNKS:
+            return None
+        ended = (self._try_peak, self._try_handled, self._try_audio, self._cross_audio)
+        self._clear_try()
+        return ended
+
+    def _weak_needed(self, now: float) -> float | None:
+        """The lowest score that may still wake J.A.R.V.I.S, or None when weak wake-ups are off.
+        Weak wake-ups need your voice check, which then asks for a higher voice score."""
+        if self._weak is None or not getattr(self._voice_check, "has_speaker", False):
+            return None
+        if self._second_threshold is not None and now < self._second_until:
+            return min(self._weak, self._second_threshold)
+        return self._weak
+
+    def _weak_try(self, peak: float, now: float) -> WakeEvent | None:
+        needed = self._weak_needed(now)
+        if needed is not None and peak >= needed:
+            return WakeEvent("hey jarvis", round(peak, 3), weak=True)
+        self._note_try(now, peak, "low")
+        if self._second_threshold is not None and peak >= self._second_threshold:
+            self._open_second_chance(now)
+        return None
+
+    def _note_try(self, now: float, score: float | None, stopped: str) -> None:
+        self._tries.append((now, score, stopped))
+
+    def _open_second_chance(self, now: float) -> None:
+        if self._second_seconds > 0:
+            self._second_until = now + self._second_seconds
+
+    def _decide(self, event: WakeEvent, now: float, chunks: list | None = None) -> WakeEvent | None:
         if now - self._last_wake < self._cooldown:
             return None
         if event.source == "hey jarvis" and self._voice_check is not None:
             if now - self._last_reject < self.REJECT_PAUSE_SECONDS:
                 self._above = 0
                 return None
+            extra = self._weak_extra if event.weak else 0.0
+            sound = list(chunks) if chunks else list(self._recent)
             try:
-                voiced = bool(self._voice_check(list(self._recent)))
+                voiced = bool(self._voice_check(sound, extra=extra) if extra else self._voice_check(sound))
             except Exception:
-                voiced = True                    # a broken check must not make J.A.R.V.I.S deaf
+                voiced = not event.weak          # a broken check must not make J.A.R.V.I.S deaf (strong only)
             if not voiced:
                 self._last_reject, self._above = now, 0
                 self.rejected += 1
+                reason = getattr(self._voice_check, "failed", None) or "no voice"
+                self._note_try(now, event.score, reason)
+                self._open_second_chance(now)
                 if self._audit is not None:
-                    reason = getattr(self._voice_check, "failed", None) or "no voice"
-                    extra = {}
+                    extra_fields = {"weak": True} if event.weak else {}
                     voice_score = getattr(self._voice_check, "score", None)
                     if isinstance(voice_score, float):
-                        extra["voice_score"] = round(voice_score, 3)      # a number, never sound
+                        extra_fields["voice_score"] = round(voice_score, 3)   # a number, never sound
                     self._audit.record("wake_rejected", source=event.source, score=event.score,
-                                       reason=reason, **extra)
+                                       reason=reason, **extra_fields)
                 return None
         self._last_wake = now
         self._above = 0
+        tries = [[round(now - t, 1), s, why] for t, s, why in self._tries if now - t <= self.TRIES_NOTED_SECONDS]
+        self._tries.clear()
         if self._audit is not None:
-            extra = {}
+            extra_fields = {"weak": True} if event.weak else {}
             voice_score = getattr(self._voice_check, "score", None) if event.source == "hey jarvis" else None
             if isinstance(voice_score, float):
-                extra["voice_score"] = round(voice_score, 3)          # a number, never sound
-            self._audit.record("wake", source=event.source, score=event.score, **extra)
+                extra_fields["voice_score"] = round(voice_score, 3)          # a number, never sound
+            if tries and event.source == "hey jarvis":
+                extra_fields["tries_before"] = tries   # near misses just before: seconds ago, score, why
+            self._audit.record("wake", source=event.source, score=event.score, **extra_fields)
         return event
+
+    # ---- the wake-up self-test ------------------------------------------------------------------
+    def start_test(self, on_try: Callable[[dict], None], on_done: Callable[[dict], None],
+                   tries: int = 10, seconds: float = 90.0) -> None:
+        """Measure your "hey jarvis": each try is scored by every check and reported (numbers only),
+        and nothing wakes until the test ends (after `tries` tries or `seconds`)."""
+        self._clear_try()
+        self._test = {"on_try": on_try, "on_done": on_done, "tries": tries, "until": self._clock() + seconds,
+                      "n": 0, "verdicts": []}
+
+    @property
+    def testing(self) -> bool:
+        return self._test is not None
+
+    def stop_test(self) -> None:
+        test, self._test = self._test, None
+        if test is None:
+            return
+        verdicts = test["verdicts"]
+        passed = sum(1 for v in verdicts if v.startswith("passed"))
+        stops: dict[str, int] = {}
+        for v in verdicts:
+            if not v.startswith("passed"):
+                stops[v] = stops.get(v, 0) + 1
+        try:
+            test["on_done"]({"count": len(verdicts), "passed": passed, "stops": stops})
+        except Exception:
+            pass
+
+    def _test_try(self, peak: float, sound: list | None = None) -> None:
+        test = self._test
+        if test is None:
+            return
+        check = self._voice_check
+        sound = list(sound) if sound else list(self._recent)
+        diag = check.diagnose(sound) if hasattr(check, "diagnose") else {}
+        weak_needed = self._weak if (self._weak is not None and getattr(check, "has_speaker", False)) else None
+        if peak > self._threshold:
+            wake_ok, extra = True, 0.0
+        elif weak_needed is not None and peak >= weak_needed:
+            wake_ok, extra = True, self._weak_extra
+        else:
+            wake_ok, extra = False, 0.0
+        speech, speech_needed = diag.get("speech"), diag.get("speech_needed")
+        voice, bar = diag.get("voice"), diag.get("bar")
+        voice_needed = round(bar + extra, 3) if bar is not None else None
+        if not wake_ok:
+            verdict = "hey jarvis score too low"
+        elif speech is not None and speech_needed is not None and speech < speech_needed:
+            verdict = "no voice heard"
+        elif voice_needed is not None and (voice is None or voice < voice_needed):
+            verdict = "not your voice"
+        else:
+            verdict = "passed (weak)" if extra else "passed"
+        test["n"] += 1
+        test["verdicts"].append(verdict)
+        result = {"n": test["n"], "of": test["tries"], "wake": round(peak, 3), "wake_needed": self._threshold,
+                  "weak_needed": weak_needed, "speech": speech, "speech_needed": speech_needed,
+                  "voice": voice, "voice_needed": voice_needed, "verdict": verdict}
+        try:
+            test["on_try"](result)
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------

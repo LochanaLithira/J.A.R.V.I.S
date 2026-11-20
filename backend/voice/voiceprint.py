@@ -427,7 +427,12 @@ class SpeakerCheck:
                 return "unsure", None
         return ("you" if s >= self._vp.threshold else "not you"), s
 
-    def __call__(self, chunks: Iterable[np.ndarray]) -> bool:
+    def bar(self, extra: float = 0.0) -> float:
+        """The pass mark a wake-up must reach (plus `extra` for a weak "hey jarvis")."""
+        return wake_bar(self._vp) + max(0.0, extra)
+
+    def __call__(self, chunks: Iterable[np.ndarray], extra: float = 0.0) -> bool:
+        """`extra` raises the pass mark for a weak "hey jarvis" (one the wake detector was unsure of)."""
         try:
             s = self.score(chunks)
         except VoiceprintError:                 # too little sound to recognise anyone: not you
@@ -439,7 +444,7 @@ class SpeakerCheck:
                 self.on_score(s)
             except Exception:
                 pass
-        return s >= wake_bar(self._vp)
+        return s >= self.bar(extra)
 
 
 def command_judge(check: object) -> Callable[[np.ndarray], tuple[str, float | None]] | None:
@@ -460,16 +465,41 @@ class AllChecks:
         self.failed: str | None = None
         self.score: float | None = None
 
-    def __call__(self, chunks: list) -> bool:
+    def __call__(self, chunks: list, extra: float = 0.0) -> bool:
+        """`extra` is passed to your voice check only: a weak "hey jarvis" needs a higher voice score."""
         self.failed, self.score = None, None
         for name, check in self._checks:
-            ok = check(chunks)
-            if isinstance(check, (SpeakerCheck, StrictCheck)):
+            speaker = isinstance(check, (SpeakerCheck, StrictCheck))
+            ok = check(chunks, extra=extra) if speaker and extra else check(chunks)
+            if speaker:
                 self.score = check.last_score
             if not ok:
                 self.failed = name
                 return False
         return True
+
+    @property
+    def has_speaker(self) -> bool:
+        """Is your voice check one of these checks? (Weak wake-ups are only allowed when it is.)"""
+        return any(isinstance(c, (SpeakerCheck, StrictCheck)) for _, c in self._checks)
+
+    def diagnose(self, chunks: list) -> dict:
+        """Every check's number, without stopping at the first that fails (for the wake-up self-test).
+        Numbers only: {"speech": seconds or None, "speech_needed": seconds or None,
+        "voice": score or None, "bar": pass mark or None}."""
+        out: dict = {"speech": None, "speech_needed": None, "voice": None, "bar": None}
+        for _name, check in self._checks:
+            inner = check._check if isinstance(check, StrictCheck) else check
+            try:
+                if isinstance(inner, SpeakerCheck):
+                    out["bar"] = round(inner.bar(), 3)
+                    out["voice"] = round(inner.score(chunks), 3)
+                elif hasattr(inner, "speech_seconds"):
+                    out["speech"] = round(inner.speech_seconds(chunks), 2)
+                    out["speech_needed"] = getattr(inner, "min_speech", None)
+            except Exception:
+                pass                            # too little sound, or a broken check: left as None
+        return out
 
 
 class StrictCheck:
@@ -480,11 +510,11 @@ class StrictCheck:
         self._check = check
         self.last_score: float | None = None
 
-    def __call__(self, chunks: list) -> bool:
+    def __call__(self, chunks: list, extra: float = 0.0) -> bool:
         if self._check is None:
             return False                    # the voice check couldn't be set up: refuse
         try:
-            ok = bool(self._check(chunks))
+            ok = bool(self._check(chunks, extra=extra) if extra else self._check(chunks))
         except Exception:
             ok = False
         self.last_score = getattr(self._check, "last_score", None)

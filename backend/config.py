@@ -70,14 +70,26 @@ PREFERENCES = _base / "jarvis" / "preferences.json"
 WAKE_THRESHOLD = 0.25
 WAKE_PATIENCE = 1                # slices of 80 ms in a row that must pass the threshold
 WAKE_COOLDOWN_SECONDS = 1.5      # after a wake, ignore triggers for this long
+# A weaker "hey jarvis" still counts when your voice check passes with room to spare. This
+# detector was trained on synthetic American voices, so real accents often score low: yours
+# scored 0.25-0.51 when it woke, and many tries fell just short. A score from
+# WAKE_WEAK_THRESHOLD up to WAKE_THRESHOLD needs your voice score WAKE_WEAK_EXTRA above your
+# pass mark. Only used once you have taught your voice (TV and music still fail the voice check).
+WAKE_WEAK_THRESHOLD = 0.15
+WAKE_WEAK_EXTRA = 0.05
+# Second chance: after a near miss, a repeat within this many seconds counts from this lower score
+# (it still needs the voice check with the extra margin).
+WAKE_SECOND_CHANCE_SECONDS = 5.0
+WAKE_SECOND_CHANCE_THRESHOLD = 0.08
 # Only wake up if the moment "hey jarvis" was heard really contained a human voice (checked on
 # this laptop). Over 4 days, 28 of 41 wake-ups were background noise; this check drops those.
 WAKE_SPEECH_CHECK = True
-# Measured with synthetic sounds: at 0.7 confidence a spoken "hey jarvis" gives ~0.7 s of voice,
-# fast knocking 0.38 s, keyboard typing and hiss 0 s. If your real "hey jarvis" is ever ignored,
-# the audit log shows "wake_rejected": lower these a little.
+# Measured (14 Nov) in the last 1.6 s, at 0.7 confidence: a spoken "hey jarvis" gives 0.42-0.45 s
+# of voice, said quickly only 0.32 s (so the old 0.4 s minimum refused it); fast knocking and
+# keyboard typing give 0 s. At 0.5 confidence typing reached 1.2 s, so 0.7 stays and the minimum
+# drops to 0.25 s. If your real "hey jarvis" is ignored, the audit log shows "wake_rejected".
 WAKE_SPEECH_CONFIDENCE = 0.7     # how sure the local voice detector must be, per 32 ms frame
-WAKE_MIN_SPEECH_SECONDS = 0.4    # at least this much voice in the last ~2 seconds
+WAKE_MIN_SPEECH_SECONDS = 0.25   # at least this much voice in the last 1.6 seconds
 
 # Your voice check: once you have taught J.A.R.V.I.S your voice, "hey jarvis" only counts when it
 # sounds like you. Teach it with:  python -m backend.voice.enroll teach
