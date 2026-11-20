@@ -499,6 +499,52 @@ def test_one_breath_commands_keep_the_words_said_before_the_wake_word_was_confir
     assert flow.seen == ["Open the download folder."]             # the wake word is not part of the command
 
 
+def test_one_breath_talk_without_jarvis_is_ignored(run_assistant):
+    """10 Nov, 01:24: reading aloud scored 0.35 on the wake word; your voice passed the voice check,
+    and "The visual chart splits..." became a command. Now the words must contain "Jarvis"."""
+    from backend.voice.style import Style
+
+    class Audit:
+        def __init__(self):
+            self.events = []
+
+        def record(self, event, **fields):
+            self.events.append((event, fields))
+
+    class TriggersWithMemory(FakeTriggers):
+        def recent(self, seconds=1.6):
+            return [np.full(CHUNK, 7, np.int16)] * 20
+
+    triggers = TriggersWithMemory()
+    triggers._audit = Audit()
+    flow = FakeFlow()
+    a, trig, mics, statuses, notices, shown, chimes = run_assistant(
+        triggers=triggers, flow=flow, wake_reply=True, style=Style(choose=first_choice),
+        speech_probe=Probe(talking=True), voice=FakeVoice(triggers))
+    a._speech = FakeSpeech(Heard(text="The visual chart splits compression methods into two.", reason="done"))
+    trig.fire.set()
+    assert wait_for(lambda: triggers._audit.events)
+    assert triggers._audit.events == [("wake_unconfirmed", {"source": "hey jarvis"})]   # never the words
+    time.sleep(0.2)
+    assert flow.seen == [] and a._voice.said == [] and "close" not in chimes
+
+
+@pytest.mark.parametrize("text, rest", [
+    ("Hey Jarvis, open notepad.", "Open notepad."),
+    ("So, hey Jarvis open the downloads", "Open the downloads"),
+    ("Hey Jervis set the brightness to 50", "Set the brightness to 50"),
+    ("Hey Travis, stop the music", "Stop the music"),
+    ("Okay Jarvis. What is the time?", "What is the time?"),
+    ("Jarvis", ""),
+    ("The visual chart splits compression methods into two", None),
+    ("Charges are high this month", None),
+    ("I was telling my friend that Jarvis is great", None),         # too far in: not a wake-up
+    ("", None),
+])
+def test_after_wake_word(text, rest):
+    assert main.after_wake_word(text) == rest
+
+
 @pytest.mark.parametrize("text, cleaned", [
     ("Hey Jarvis, open the download folder.", "Open the download folder."),
     ("hey jarvis open notepad", "Open notepad"),

@@ -421,7 +421,38 @@ def test_a_changed_voiceprint_shows_as_a_problem():
 
 def test_settings_commands_are_exactly_the_documented_ones():
     assert set(COMMANDS) == {"teach_start", "teach_record", "teach_redo", "teach_cancel", "voice_test",
-                             "voice_forget", "voice_status"}
+                             "voice_forget", "voice_status", "wake_test_start", "wake_test_stop"}
+
+
+def test_wake_test_buttons_reach_the_listening_loop():
+    shown = []
+
+    class Listening:
+        def __init__(self, problem=""):
+            self.problem, self.started, self.stopped = problem, 0, 0
+
+        def start_wake_test(self, on_update):
+            self.started += 1
+            return self.problem
+
+        def stop_wake_test(self):
+            self.stopped += 1
+
+    a = Listening()
+    s = VoiceSettings(lambda: a, lambda u: None, lambda u: None, lambda t, x: True, Secrets().get, Secrets().set,
+                      Secrets().delete, lambda **kw: None, show_wake_test=shown.append)
+    s.handle("wake_test_start")
+    s.handle("wake_test_stop")
+    assert a.started == 1 and a.stopped == 1 and shown == [{"phase": "running", "tries": [], "of": 10}]
+    b = Listening(problem="J.A.R.V.I.S isn't listening right now.")
+    s2 = VoiceSettings(lambda: b, lambda u: None, lambda u: None, lambda t, x: True, Secrets().get, Secrets().set,
+                       Secrets().delete, lambda **kw: None, show_wake_test=shown.append)
+    s2.handle("wake_test_start")
+    assert shown[-1] == {"phase": "failed", "message": "J.A.R.V.I.S isn't listening right now."}
+    s3 = VoiceSettings(lambda: None, lambda u: None, lambda u: None, lambda t, x: True, Secrets().get, Secrets().set,
+                       Secrets().delete, lambda **kw: None, show_wake_test=shown.append)
+    s3.handle("wake_test_start")
+    assert shown[-1]["phase"] == "failed"
 
 
 # ---- the main loop lets go of the microphone while you teach ---------------------------------------------

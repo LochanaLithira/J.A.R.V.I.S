@@ -311,6 +311,12 @@ body.state-problem .status-word { animation: flicker 1.2s infinite; }
 .setting-message { margin: 0 0 6px; font-family: var(--mono); font-size: 12px; color: var(--amber); min-height: 1em; }
 .setting-help { margin: 0 0 16px; font-size: 13px; line-height: 1.5; color: var(--dim); }
 .setting-actions { display: flex; flex-wrap: wrap; gap: 10px; }
+.wake-test { margin-top: 16px; padding-top: 14px; border-top: 1px dashed rgba(var(--accent-rgb), 0.25); animation: rise 0.25s ease-out; }
+.wake-test-tries { margin: 0 0 10px; padding-left: 0; list-style: none; font-family: var(--mono); font-size: 12px; line-height: 1.7; }
+.wake-test-tries li::before { content: "\25CF  "; }
+.wake-test-tries li.ok::before { color: var(--accent); }
+.wake-test-tries li.warn { color: var(--dim); }
+.wake-test-tries li.warn::before { color: var(--amber); }
 
 .teach { margin-top: 22px; padding-top: 20px; border-top: 1px dashed rgba(var(--accent-rgb), 0.25); animation: rise 0.3s ease-out; }
 .teach-top { display: flex; align-items: center; gap: 22px; margin-bottom: 18px; }

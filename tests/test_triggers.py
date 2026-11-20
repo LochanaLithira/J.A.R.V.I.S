@@ -291,10 +291,11 @@ def test_a_rejected_moment_is_not_rechecked_every_slice():
     for _ in range(10):                                       # 0.8 s of high scores
         now[0] += 0.08
         t.process(CH)
-    assert len(asked) == 1
+    assert len(asked) == 3                                    # checked at most every 0.3 s, not every slice
+    assert Triggers.REJECT_PAUSE_SECONDS == 0.3               # a quick repeat isn't lost in a long pause
     now[0] += 1.0
     t.process(CH)
-    assert len(asked) == 2
+    assert len(asked) == 4
 
 
 def test_a_broken_check_never_makes_it_deaf():
@@ -543,3 +544,137 @@ def test_console_listen_uses_the_shared_loop(monkeypatch, tmp_path):
     seen["on_status"](cli.Status.PROBLEM, "I couldn't open the microphone.")
     assert lines[0].startswith("Listening.") and len(lines) == 2
     assert lines[1] == "(problem: I couldn't open the microphone.)"
+
+
+# ---- weak tries, second chance, near misses, and the self-test (14 Nov) ----------------------
+
+class FakeSpeaker:
+    """Stands in for AllChecks with your voice check: passes when the voice score reaches 0.45 + extra."""
+    has_speaker = True
+
+    def __init__(self, voice=0.55, speech=0.4):
+        self.voice, self.speech, self.calls = voice, speech, []
+        self.failed, self.score = None, None
+
+    def __call__(self, chunks, extra=0.0):
+        self.calls.append(extra)
+        self.score = self.voice
+        ok = self.voice >= 0.45 + extra
+        self.failed = None if ok else "not your voice"
+        return ok
+
+    def diagnose(self, chunks):
+        return {"speech": self.speech, "speech_needed": 0.25, "voice": self.voice, "bar": 0.45}
+
+
+class Audit:
+    def __init__(self):
+        self.events = []
+
+    def record(self, event, **fields):
+        self.events.append((event, fields))
+
+
+def weak_triggers(scores, check, audit=None, clock=None):
+    now = [0.0]
+    t = Triggers(FakeWake(scores), threshold=0.25, clock=clock or (lambda: now[0]), voice_check=check, audit=audit,
+                 weak_threshold=0.15, weak_extra=0.05, second_chance_seconds=5.0, second_chance_threshold=0.08)
+    return t, now
+
+
+def run(t, now, n):
+    events = []
+    for _ in range(n):
+        now[0] += 0.08
+        e = t.process(CH)
+        if e is not None:
+            events.append(e)
+    return events
+
+
+def test_a_weak_try_wakes_when_the_voice_passes_with_room_to_spare():
+    check = FakeSpeaker(voice=0.55)
+    t, now = weak_triggers([0.1, 0.2, 0.18, 0.0, 0.0, 0.0, 0.0], check)
+    events = run(t, now, 7)
+    assert [(e.source, e.score, e.weak) for e in events] == [("hey jarvis", 0.2, True)]
+    assert check.calls == [0.05]                               # the voice check was asked for 0.45 + 0.05
+
+
+def test_a_weak_try_in_a_voice_just_over_the_pass_mark_is_refused():
+    check = FakeSpeaker(voice=0.47)                            # enough for a strong try, not a weak one
+    audit = Audit()
+    t, now = weak_triggers([0.2, 0.0, 0.0, 0.0], check, audit=audit)
+    assert run(t, now, 4) == []
+    assert audit.events == [("wake_rejected", {"source": "hey jarvis", "score": 0.2, "reason": "not your voice",
+                                               "weak": True, "voice_score": 0.47})]
+
+
+def test_weak_tries_need_your_voice_check():
+    plain = lambda chunks: True                                  # no voiceprint: only the speech check
+    t, now = weak_triggers([0.2, 0.0, 0.0, 0.0], plain)
+    assert run(t, now, 4) == []
+
+
+def test_a_strong_try_is_decided_at_once_and_not_again_at_its_end():
+    check = FakeSpeaker(voice=0.55)
+    t, now = weak_triggers([0.1, 0.3, 0.2, 0.0, 0.0, 0.0], check)
+    events = run(t, now, 6)
+    assert [(e.score, e.weak) for e in events] == [(0.3, False)] and check.calls == [0.0]
+
+
+def test_second_chance_after_a_near_miss():
+    check = FakeSpeaker(voice=0.6)
+    scores = [0.1, 0.0, 0.0, 0.0] + [0.0] * 5 + [0.11, 0.0, 0.0, 0.0]   # 0.10 misses; a 0.11 repeat counts
+    t, now = weak_triggers(scores, check)
+    events = run(t, now, len(scores))
+    assert [(e.score, e.weak) for e in events] == [(0.11, True)]
+
+
+def test_no_second_chance_after_it_closes():
+    check = FakeSpeaker(voice=0.6)
+    scores = [0.1, 0.0, 0.0, 0.0] + [0.0] * 70 + [0.11, 0.0, 0.0, 0.0]  # the repeat comes ~6 s later
+    t, now = weak_triggers(scores, check)
+    assert run(t, now, len(scores)) == []
+
+
+def test_near_misses_are_noted_with_the_next_wake_up():
+    check = FakeSpeaker(voice=0.6)
+    audit = Audit()
+    scores = [0.07, 0.0, 0.0, 0.0] + [0.0] * 10 + [0.3]
+    t, now = weak_triggers(scores, check, audit=audit)
+    run(t, now, len(scores))
+    event, fields = audit.events[-1]
+    assert event == "wake" and fields["score"] == 0.3
+    assert fields["tries_before"] == [[0.9, 0.07, "low"]]      # seconds since that try ended, score, why
+
+
+def test_the_self_test_measures_every_try_and_wakes_nothing():
+    check = FakeSpeaker(voice=0.55, speech=0.4)
+    t, now = weak_triggers([0.3, 0.0, 0.0, 0.0, 0.18, 0.0, 0.0, 0.0, 0.1, 0.0, 0.0, 0.0], check)
+    tries, done = [], []
+    t.start_test(tries.append, done.append, tries=3, seconds=60)
+    assert run(t, now, 12) == []                               # nothing woke during the test
+    assert [r["verdict"] for r in tries] == ["passed", "passed (weak)", "hey jarvis score too low"]
+    assert tries[1]["voice_needed"] == 0.5 and tries[0]["voice_needed"] == 0.45
+    assert done == [{"count": 3, "passed": 2, "stops": {"hey jarvis score too low": 1}}]
+    assert t.testing is False
+
+
+def test_the_self_test_stops_after_its_time():
+    t, now = weak_triggers([0.0] * 20, FakeSpeaker())
+    done = []
+    t.start_test(lambda r: None, done.append, tries=10, seconds=1.0)
+    run(t, now, 20)
+    assert done == [{"count": 0, "passed": 0, "stops": {}}]
+
+
+def test_weak_settings_are_checked():
+    for bad in ({"weak_threshold": 0.3}, {"weak_threshold": 0.0}, {"second_chance_threshold": 0.25},
+                {"weak_extra": 1.0}):
+        with pytest.raises(ValueError):
+            Triggers(threshold=0.25, **bad)
+
+
+def test_config_wake_settings():
+    assert 0 < config.WAKE_SECOND_CHANCE_THRESHOLD < config.WAKE_WEAK_THRESHOLD < config.WAKE_THRESHOLD
+    assert 0 < config.WAKE_WEAK_EXTRA <= 0.1 and 0 < config.WAKE_SECOND_CHANCE_SECONDS <= 10
